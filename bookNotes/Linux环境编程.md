@@ -374,7 +374,72 @@ int ftruncate(int fd, off_t length);
 
 - 无缓存 没有任何缓存
 
+### ``fopen`` 和 ``open`` 标识位对比
+
+![fopen和open标志位对比](./imags/fopen和open标志位对比.png)
+
+### `fdopen` 与 `fileno`
+
+```c++
+FILE *fdopen(int fd, const char *mode); // 建立一个新的文件流，并且及逆行绑定
+int fileno(FLIE *stream); // 返回文件流绑定的文件描述符
+
+//  关闭文件时都要使用 fclose 才能释放文件流占用的内存
+```
+
+### 小心 `getc` 和 `fgetc`
+
+```c++
+int fgetc(FILE *stream);
+int getc(FILE *stream);
+```
+
+### 注意 `fread` 和 `fwrite` 的返回值
+
+```c++
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
+size_t fwrite(const void *ptr, size_t size, size_t nmeb, FILE *stream);
+```
+
+### 创建临时文件
+
 ## 3. 进程环境
+
+### ``__attribute__``
+
+- ``aligned(n)``
+- ``packed``
+- ``section("name")``
+- ``unused``
+- ``deprecated``
+- ``noreturn``
+- ``format``
+- ``constructor``
+- ``destructor``
+
+### ``atexit``
+
+```c++
+int atexit(void (*function)(void));
+
+// 只有使用 exit 退出或者使用 main 中的return退出才会调用，收到信号不会
+```
+
+### 小心使用环境变量
+
+```c++
+int putenv(char *string);
+int setenv(const char *name, const char *value, int overwrite);
+```
+
+### 使用动态库
+
+- 静态库在链接阶段，会被直接链接进最终的二进制文件中，因此最终生成的二进制文件体积会比较大，但是不再依赖于库文件
+- 动态库并不是被链接到文件中的，只是保存了依赖关系，生成的二进制文件体积比较小，但是在运行阶段需要加载动态库
+
+### 避免内存问题
+
+### 长调转
 
 ## 4. 进程控制：进程的一生
 
