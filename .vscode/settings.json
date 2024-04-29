@@ -71,7 +71,8 @@
         "vector": "cpp",
         "algorithm": "cpp",
         "fstream": "cpp",
-        "iomanip": "cpp"
+        "iomanip": "cpp",
+        "pthread.h": "c"
     },
     "markdownlint.config": {
         "MD033": false,     /* 设置屏蔽信息 */
@@ -84,5 +85,4 @@
         "MD025": false           
     },
     "C_Cpp.errorSquiggles": "disabled",
-
 }

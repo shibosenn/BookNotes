@@ -4,19 +4,40 @@
 
 ### 一个 Linux 程序诞生记
 
-- `gcc -E test.c > test.i` 保存预处理之后的文件
-- `gcc -S test.c > tset.s` 保存编译之后的文件
+- `gcc -E test.c -o test.i` 保存预处理之后的文件
+- `gcc -S test.c`
 - `-Wall` 打开所有的警告信息
 - `-v` 显示更详细的编译信息
 
 ### 程序的构成
 
 - 使用 `readelf` 工具产看二进制文件
-- ``text``  ``rodata`` ``bss`` ``data`` ``debug`` ``dynamic`` ``fini`` ``init`` ``symtab``
+- ``text``  ``rodata`` ``data`` ``bss`` ``debug`` ``dynamic`` ``fini`` ``init`` ``symtab``
 
 ### 程序是如何“跑”的
 
 - 使用 ``strace`` 追踪
+
+### ``gcc``一些编译选项
+
+- 控制警告
+    - `-Wall`：开启所有警告信息，帮助识别潜在问题
+    - ``-Wextra``：开启额外的警告，更严格。
+    - ``-Werror``：将所有警告当作错误处理，编译中断。
+
+- 优化选项 ``-O``
+- 调试选项 ``-g``
+- 链接选项
+    - ``-l``：指定链接的库名
+    - ``-L``：用于在编译时指示库的路径，加载路径默认为 ``/lib`` 和 ``/usr/lib``
+- 预处理选项 `-D` ``-U``
+- 输出控制选项 ``-o <file>``
+- 搜索路径 ``-I``
+- 其他
+    - `-c`：进行编译和汇编，生成 ``.o`` 文件 可以直接传递 ``.i`` 或者 ``.s`` 文件
+    - `-shared`：生成动态库 
+    - `-fpic`：生成位置无关代码
+    - `-static`：使用静态链接
 
 ## 1. 文件 I/O
 
@@ -392,6 +413,8 @@ int fileno(FLIE *stream); // 返回文件流绑定的文件描述符
 ```c++
 int fgetc(FILE *stream);
 int getc(FILE *stream);
+
+// fgetc 总是一个函数，但是 getc 可能是一个宏，所以当参数有副作用时，可能会有预期外的行为
 ```
 
 ### 注意 `fread` 和 `fwrite` 的返回值
@@ -417,12 +440,43 @@ size_t fwrite(const void *ptr, size_t size, size_t nmeb, FILE *stream);
 - ``constructor``
 - ``destructor``
 
+### `exit`
+
+- 调用流程
+
+    ```c++
+    // 调用流程 exit/quick_exit -> __run_exit_handlers(执行) -> _exit -> exit_group/exit -> do_group_exit -> do_exit
+
+    void exit (int status){
+        __run_exit_handlers (status, &__exit_funcs, true, true);
+    }
+
+    void __new_quick_exit (int status){   
+         __run_exit_handlers (status, &__quick_exit_funcs, false, false);
+    }
+
+    // _run_exit_handlers 涉及到的数据结构
+    struct exit_function_list{
+        struct exit_function_list *next;
+        size_t idx;
+        struct exit_function fns[32];
+        // 通过这种方式能够提高程序的局部性，减少内存碎片，提高内存分配效率
+    };
+
+    ```
+
+- `__run_exit_handlers` 和 `do_exit` 分别执行的清理工作
+    - ``__run_exit_handlers`` 执行的清理工作是用户级的，比如释放资源、动态库处理等
+    - ``do_exit`` 是内核空间的清理，主要包括回收进程的内存页、进程描述符、关闭文件描述符、子进程处理、调度器交互等
+
 ### ``atexit``
 
 ```c++
 int atexit(void (*function)(void));
 
 // 只有使用 exit 退出或者使用 main 中的return退出才会调用，收到信号不会
+
+// 调用流程 atexit -> __cxa_atexit
 ```
 
 ### 小心使用环境变量
@@ -430,6 +484,10 @@ int atexit(void (*function)(void));
 ```c++
 int putenv(char *string);
 int setenv(const char *name, const char *value, int overwrite);
+
+// putenv 直接使用原始字符串，不进行复制，这导致如果修改了原始的字符串，环境变量也会被修改。
+// putenv 总是会覆盖同名的字符串
+// 应该使用 setenv 设置环境变量，有更好的安全性
 ```
 
 ### 使用动态库
@@ -437,15 +495,193 @@ int setenv(const char *name, const char *value, int overwrite);
 - 静态库在链接阶段，会被直接链接进最终的二进制文件中，因此最终生成的二进制文件体积会比较大，但是不再依赖于库文件
 - 动态库并不是被链接到文件中的，只是保存了依赖关系，生成的二进制文件体积比较小，但是在运行阶段需要加载动态库
 
+- 动态库的生成
+
+    ```c++
+    // foo.c
+    #include<stdio.h>
+    void foo() { printf("foo works\n"); }
+    
+    // gcc -shared foo.c -o libfoo.so
+    ```
+
+- 动态库的使用
+
+    - 系统自动加载动态库
+
+        ```c++
+        gcc test.c -lfoo -L . -o test
+        export LD_LIBRARY_PATH=/home/parallels/test:$LD_LIBRARY_PATH
+        ```
+
+    - 手工加载动态库
+
+        ```c++
+        #include <dlfcn.h>
+        
+        void *dlib = dlopen("./libfoo.so", RTLD_NOW);
+
+        if(!dlib) {
+            printf("open failed\n");
+            return -1;
+        }
+
+        void (*foo)(void) = dlsym(dlib, "foo");
+        if(!foo) {
+            printf("dlsym failed\n");
+            return -1;
+        }
+        foo();
+        dlclose(dlib);
+        return 0;
+        ```
+
+    - 程序平滑无缝的升级
+
 ### 避免内存问题
 
-### 长调转
+- 慎用 ``realloc``
+
+    ```c++
+    *ptr = realloc(*ptr, new_size);
+    if(!ptr) {
+        ... // 错误处理
+    }
+    // 错误的写法，可能会造成内存泄露，如果内存分配失败，会返回null，导致之前的内存没有被释放，但是指针已经丢失了
+    
+    // 其他可能的bug
+    // 如果传递空指针，会分配内存
+    ```
+
+- 防止内存越界
+
+    - 同步修改缓存长度和复制长度
+
+        ```c++
+        char dst_buf[64];
+        memcpy(dst_buf, src_buf, sizeof(dst_buf));
+        ```
+
+    - 使用安全的库函数
+
+        ```c++
+        char *strncat(char *dest, const char *src, size_t n);
+        // 当src包含n个以上的字符时候，dest至少还要可以容纳 n + 1 个字符，因为还会追加'\0'
+        char dest[20] = "hello";
+        strnct(dest, src, sizeof(dest) - strlen(dest) - 1);
+
+        char *strncpy(char *dest, const char *str, size_t n);
+        strncpy(dest, src, sizeof(dest) - 1);
+        
+        // 使用 snprintf 代替 sprintf
+        sprintf(char *str, const char *format, ...);
+        snprintf(char *str, size_t size, const char *format, ...);
+        
+        // 使用 fgets 代替 gets
+        gets(char *str);    // 非常危险的函数，读取一行，非常容易超出缓冲区的大小
+        fgets(char *str, int num, FILE *stream); // 更安全的选择，从指定流中读取最多num - 1 个字符或直到一个换行符被读取
+        ```
+
+### 长跳转
 
 ## 4. 进程控制：进程的一生
 
+### 进程ID
+
+```c++
+pid_t getpid(void);
+pid_t getppid(void);
+```
+
+### 进程的层次
+
+```c++
+pid_t getpgrp(void);
+pid_t getsid(pid_t pid);
+
+int setpgid(pid_t pid, pid_t pgid); // 如果参数为0，修改调用进程的进程组id
+// pid 必须为调用进程或者其子进程，pgid必须和当前进程组位于同一个会话
+
+pid_t setsid(void);
+```
+
+### 进程的创建
+
+```c++
+pid_t fork(void);
+
+// 必须要对返回值是 -1 的情况进行判断，不然可能会导致非常严重的后果，
+// 一般来讲父进程会被优先调度，但是在应用中绝对不能对父子进程的执行顺序做任何的假设
+
+// vfork vs. fork
+// vfork 创建的子进程会导致父进程挂起，除非子进程 _exit 或者 exec
+// vfork 创建的子进程会恭共享父进程的所有内存，直到子进程 exec 为止
+// vfork 创建的子进程应该使用_exit退出
+```
+
+### 守护进程
+
+- 生命周期很长，正常情况绝不终止
+- 在后台执行，并且绝不与任何控制终端相关联
+
+- `double-fork magic`
+
+### 进程的终止
+
+- 不考虑线程的情况下，进程的退出可以通过 5 种方式
+
+    - ``exit``、``_exit``、`return`
+    - ``abort``、被信号终止
+
+### 等待子进程
+
+### exec 家族
+
+### system 函数
+
 ## 5. 进程控制：状态、调度和优先级
 
+### 进程的状态
+
+### 进程的调度概述
+
+### 普通进程的优先级
+
+### 完全公平调度的实现
+
+### 普通进程的组调度
+
+### 实时进程
+
+### CPU 的亲和力
+
 ## 6. 信号
+
+### 信号的完整生命周期
+
+### 信号的产生
+
+### 信号的默认处理函数
+
+### 信号的分类
+
+### 传统信号的特点
+
+### 信号的可靠性
+
+### 信号的安装
+
+### 信号的发送
+
+### 信号与线程的关系
+
+### 等待信号
+
+### 通过文件描述符来获取信号
+
+### 信号递送的顺序
+
+### 异步信号安全
 
 ## 7. 理解 Linux 线程
 
