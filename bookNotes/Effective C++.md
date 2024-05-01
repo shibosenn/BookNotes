@@ -899,7 +899,7 @@ public:
 };
 
 template<typename Company>
-class SendmsgWithLog {
+class SendmsgWithLog : public Sendmdg<typename Company>{
 public:
     void SendWithLog() {
         Send(); // ERROR! use of undeclared identifier 'Send'

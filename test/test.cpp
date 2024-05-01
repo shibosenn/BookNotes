@@ -1,25 +1,19 @@
 #include <iostream>
 #include <new>
 #include <memory>
+#include <dlfcn.h>
 
 
 int main() {
+    std::cout << "pre open" << std::endl;
 
-    auto deleter = [](int *p){
-        delete []p;
-    };
-    std::shared_ptr<int> sp{new int[3]{1, 2, 3}, deleter};
-    auto dp = std::get_deleter<decltype(deleter)>(sp);
+    void *dl = dlopen("./libfoo.so", RTLD_NOW);
 
-    // *dp = [](int *p) {
-    //     std::cout << "chage successful" << std::endl;
-    //     delete []p;
-    // };
+    if(dl == nullptr) {
+        std::cout << "can not open" << std::endl;
+    }
 
+    std:: cout << "after open" << std::endl;
 
-    // int *p = new int [10];
-    // deleter(p);
-
-    return 0;
-
+    dlclose(dl);
 }

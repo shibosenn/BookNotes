@@ -2,10 +2,7 @@
 
 ## 文件IO
 
-* 文件名与`inode`节点的关联被称作链接
-* 内核为每个进程维护一个打开文件表`（file table）`，由文件描述符索引。打开文件表存储了指向了文件inode的内存拷贝的指针和元数据（例如文件位置、访问模式等）
-* 子进程默认获得一份父进程文件表的拷贝
-* 每个进程按照惯例会至少有三个打开的文件描述符：0，1，2，除非进程显式地关闭他们
+文件名与`inode`节点的关联被称作链接
 
 ### `open`
 
@@ -17,12 +14,15 @@
 int open (const char *name, int flags);
 int open (const char *name, int flags, mode_t mode);
 
+/*
 O_APPEND    追加模式打开
 O_ASYNC     指定文件可写或者可读时产生一个信号（默认是SIGIO）该信号仅用于套接字和终端
 O_DIRECT    打开文件用于直接IO
 O_NONBLOCK  非阻塞模式下打开
 O_SYNC      用于同步IO （可以理解为在每个write操作之后都隐式地调用fsync，但是由内核实现，效率更高）
 O_TRUNC     将文件长度截断为0
+O_DIRECTORY、O_LARGEFILE、O_NOCTTY、O_NOFOLLOW
+*/
 ```
 
 ### `creat`

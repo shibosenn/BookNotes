@@ -35,7 +35,7 @@
 - 搜索路径 ``-I``
 - 其他
     - `-c`：进行编译和汇编，生成 ``.o`` 文件 可以直接传递 ``.i`` 或者 ``.s`` 文件
-    - `-shared`：生成动态库 
+    - `-shared`：生成动态库
     - `-fpic`：生成位置无关代码
     - `-static`：使用静态链接
 
@@ -327,7 +327,7 @@ int fsync(int fd);
 // 同步所有数据和元数据
 
 int fdatasync(int fd);
-// 和fsync 蕾丝，但是只会同步文件的实际数据修改，和会影响后面操作的元数据
+// 和fsync 类似，但是只会同步文件的实际数据修改，和会影响后面操作的元数据
 ```
 
 ### 文件的元数据
@@ -446,7 +446,6 @@ size_t fwrite(const void *ptr, size_t size, size_t nmeb, FILE *stream);
 
     ```c++
     // 调用流程 exit/quick_exit -> __run_exit_handlers(执行) -> _exit -> exit_group/exit -> do_group_exit -> do_exit
-
     void exit (int status){
         __run_exit_handlers (status, &__exit_funcs, true, true);
     }
@@ -466,7 +465,7 @@ size_t fwrite(const void *ptr, size_t size, size_t nmeb, FILE *stream);
     ```
 
 - `__run_exit_handlers` 和 `do_exit` 分别执行的清理工作
-    - ``__run_exit_handlers`` 执行的清理工作是用户级的，比如释放资源、动态库处理等
+    - ``__run_exit_handlers`` 执行的清理工作是用户级的
     - ``do_exit`` 是内核空间的清理，主要包括回收进程的内存页、进程描述符、关闭文件描述符、子进程处理、调度器交互等
 
 ### ``atexit``
@@ -609,6 +608,11 @@ pid_t setsid(void);
 
 ```c++
 pid_t fork(void);
+/* 
+调用流程
+fork/vfork/clone -> do_fork -> copy_porcess -> copy_semundo/files/fs/sighand/signal/mm/namespace/io/thread
+*/
+
 
 // 必须要对返回值是 -1 的情况进行判断，不然可能会导致非常严重的后果，
 // 一般来讲父进程会被优先调度，但是在应用中绝对不能对父子进程的执行顺序做任何的假设
@@ -632,6 +636,75 @@ pid_t fork(void);
 
     - ``exit``、``_exit``、`return`
     - ``abort``、被信号终止
+
+- 等待子进程
+
+    ```c++
+    pid_t wait(int *status);
+    pit_t waitpid(pid_t wait, int *sataus, int options);
+
+    int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options);
+    /*
+    能够提供更精准的控制，可以区分终止事件和停止事件，可以不改变子进程状态
+        WEXITED：等待子进程的终止事件
+        WSTOPED：等待被信号暂停的子进程事件
+        WCONTINUED：等待被暂停，但是被SIGCONT信号恢复执行的子进程
+        WNOWAiT：只负责获取信息，不要改变子进程的状态
+    */
+    ```
+
+    ```c++
+    SYSCALL_DEFINE4(wait4, pid_t, upid, int __user *, stat_addr, int, options, struct rusage __user *, ru)
+    {
+        struct wait_opts wo;
+        struct pid *pid = NULL;
+        enum pid_type type;
+        long ret;
+
+        if (options & ~(WNOHANG|WUNTRACED|WCONTINUED|
+                __WNOTHREAD|__WCLONE|__WALL))
+            return -EINVAL;
+
+        if (upid == -1)
+            type = PIDTYPE_MAX;
+        else if (upid < 0) {
+            type = PIDTYPE_PGID;
+            pid = find_get_pid(-upid);
+        } else if (upid == 0) {
+            type = PIDTYPE_PGID;
+            pid = get_task_pid(current, PIDTYPE_PGID);
+        } else /* upid > 0 */ {
+            type = PIDTYPE_PID;
+            pid = find_get_pid(upid);
+        }
+
+        wo.wo_type	= type;
+        wo.wo_pid	= pid;
+        wo.wo_flags	= options | WEXITED;
+        wo.wo_info	= NULL;
+        wo.wo_stat	= stat_addr;
+        wo.wo_rusage	= ru;
+        ret = do_wait(&wo);
+        put_pid(pid);
+
+        /* avoid REGPARM breakage on x86: */
+        asmlinkage_protect(4, ret, upid, stat_addr, options, ru);
+        return ret;
+    }
+    ```
+
+    - ``do_exit``中， 进程会释放基本所有的资源，但是还有两桩心愿：
+
+        - 作为父亲进程，谁为他的子进程收尸
+        - 作为子进程，需要通知父进程为自己收尸
+
+        ```c++
+        // do_exit -> exit_notify -> (forget_original_parent, do_notify_parent)
+
+        // 多线程的情况，只有线程组的主线程才有资格通知父进程，线程组的其他线程终止的时候，不需要通知父进程
+        // 如果主线程先死了，但是其他线程还没有终止，那么会在最后一个线程退出的时候通知父进程
+
+        ```
 
 ### 等待子进程
 

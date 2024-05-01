@@ -31,7 +31,6 @@
 
 ### Default Constructor 的建构操作
 
-
 ### Copy Conctructor 的建构操作
 
 ## Data 语义学

@@ -454,6 +454,7 @@
 		//  函数指针 int (*p)()
 		//  函数指针数组 int (*p[N])()
 		//  指针数组 int *p[N]
+        //  指向数组的指针 int (*p)[N]
 		
 		template<typename T, int N>
 		class myArray {};
