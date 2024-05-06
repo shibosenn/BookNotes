@@ -371,20 +371,6 @@ FILE *tmpfile(void);
 FILE *fmemopen(void *restrict buf, size_t size, const char *restrict type);
 ```
 
-## 进程环境
-
-### 命令行参数
-
-### 环境表
-
-### C程序的存储布局空间
-
-### 共享库
-
-### 存储空间分配
-
-### 环境变量
-
 ## 进程控制
 
 ## 进程关系
