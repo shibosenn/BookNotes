@@ -31,6 +31,15 @@
 
 ### Default Constructor 的建构操作
 
+`nontrivial default constructor` 的四种情况：
+
+> 注意：默认构造函数只是满足编译器的需要，而不满足程序员的需要
+
+- 带有`Defalult Constructor` 的 `Member class object`
+- 带有`Defalult Constructor` 的 `base class`
+- 带有`virtual function` 的 `class`
+- 带有`virtual base class` 的 `class`
+
 ### Copy Conctructor 的建构操作
 
 ## Data 语义学

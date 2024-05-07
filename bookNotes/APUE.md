@@ -27,6 +27,222 @@
 
     用于告知编译器一个指针式访问数据对象的唯一且初始的方式，这能够使得编译器假设指针所指向的数据不会被其他指针所改变，从而带来更好的编译优化效果
 
+## 00. Linux 中常见的数据结构
+
+### 基础数据结构
+
+### 并发控制
+
+- ``atomic_t``
+
+    ```c++
+    typedef struct {
+        volatile int counter;
+    } atomic_t;
+    // volatile 关键字保证编译器不在进行优化，系统总是重新从他所在的内存读取数据
+    ```
+
+- ``spinlock_t``
+
+- ``seqlock_t``
+
+- ``rwlock_t``
+
+- ``mutex``
+
+- ``rw_semaphore``
+
+- ``rcu-head``
+
+    ```c++
+    /**
+     * struct rcu_head - callback structure for use with RCU
+    * @next: next update requests in a list
+    * @func: actual update function to call after the grace period.
+    */
+    struct rcu_head { // read-copy update  -> 随意读，但更新数据的时候，需要先复制一份副本，在副本上修改，在一次性的替换旧数据
+        struct rcu_head *next;
+        void (*func)(struct rcu_head *head);
+    };
+    ```
+
+### 文件管理
+
+- ``files_struct`` ``fdtable`` ``file``
+
+    每个进程会维护一个 ``files_struct`` 来记录该进程打开文件的信息
+
+    ```c++
+    struct fdtable {
+        unsigned int max_fds;
+        struct file ** fd;      /* current fd array */
+        fd_set *close_on_exec;
+        fd_set *open_fds;
+        struct rcu_head rcu;
+        struct fdtable *next;
+    };
+    ```
+
+    ```c++
+    struct files_struct {
+    /*
+    * read mostly part
+    */
+        atomic_t count;
+        struct fdtable *fdt;
+        struct fdtable fdtab;        
+    /*
+    * written part on a separate cache line in SMP
+    */
+        spinlock_t file_lock ____cacheline_aligned_in_smp;
+        int next_fd;
+        struct embedded_fd_set close_on_exec_init;
+        struct embedded_fd_set open_fds_init;
+        struct file * fd_array[NR_OPEN_DEFAULT];
+    };
+    ```
+
+    ![fdtable files_struct示意图](./imags/fdtable%20files_struct.png)
+
+    系统中的每个打开的文件在内核空间都有一个关联的 ``file`` , 在文件的所有实例都关闭后，内核会释放这个结构
+
+    一个磁盘上的文件可以对应多个 ``file``
+
+    ```c++
+    struct file {
+        union {
+            struct list_head	fu_list;
+            struct rcu_head 	fu_rcuhead;
+        } f_u;
+        struct path		f_path;
+    #define f_dentry	f_path.dentry
+    #define f_vfsmnt	f_path.mnt
+        const struct file_operations	*f_op;
+        spinlock_t		f_lock;         /* f_ep_links, f_flags, no IRQ */
+        atomic_long_t		f_count;    // 文件计数
+        unsigned int 		f_flags;    // 文件标志
+        fmode_t			f_mode;         // 访问模式
+        loff_t			f_pos;          // 文件偏移量
+        struct fown_struct	f_owner;    // 与异步IO通知相关
+        const struct cred	*f_cred;    // 打开文件使用的安全凭证
+        struct file_ra_state	f_ra;   // 用于管理文件的预读取状态
+        ...
+    };
+
+    ```
+
+- ``dentry ( directory entry )``
+
+    ``inode`` 仅仅保存了文件对象的属性信息，包括权限、属组、数据块的位置、时间戳等，但是没有包含文件名，通过 ``dentry`` 能够在内存中维护文件系统的目录树，是一个纯粹的内存结构，由文件系统提供文件访问的过程中直接在内存建立
+
+    ``inode``可以理解为对应于物理磁盘上的具体对象， ``dentry`` 是一个内存实体，每个 ``dentry`` 都有唯一对应的 ``inode``
+
+    ```c++
+    struct dentry {
+        atomic_t d_count;
+        unsigned int d_flags;		/* protected by d_lock */
+        spinlock_t d_lock;		/* per dentry lock */
+        int d_mounted;
+        struct inode *d_inode;		/* Where the name belongs to - NULL is
+                        * negative */
+        /*
+        * The next three fields are touched by __d_lookup.  Place them here
+        * so they all fit in a cache line.
+        */
+        struct hlist_node d_hash;	/* lookup hash list */
+        struct dentry *d_parent;	/* parent directory */
+        struct qstr d_name;
+
+        struct list_head d_lru;		/* LRU list */
+        /*
+        * d_child and d_rcu can share memory
+        */
+        union {
+            struct list_head d_child;	/* child of parent list */
+            struct rcu_head d_rcu;
+        } d_u;
+        struct list_head d_subdirs;	/* our children */
+        struct list_head d_alias;	/* inode alias list */
+        unsigned long d_time;		/* used by d_revalidate */
+        const struct dentry_operations *d_op;
+        struct super_block *d_sb;	/* The root of the dentry tree */
+        void *d_fsdata;			/* fs-specific data */
+
+        unsigned char d_iname[DNAME_INLINE_LEN_MIN];	/* small names */
+    };
+    ```
+
+- ``vfs_mount``
+
+    ```c++
+    struct vfsmount {
+        struct list_head mnt_hash;
+        struct vfsmount *mnt_parent;	/* fs we are mounted on */
+        struct dentry *mnt_mountpoint;	/* dentry of mountpoint */
+        struct dentry *mnt_root;	/* root of the mounted tree */
+        struct super_block *mnt_sb;	/* pointer to superblock */
+        struct list_head mnt_mounts;	/* list of children, anchored here */
+        struct list_head mnt_child;	/* and going through their mnt_child */
+        int mnt_flags;
+        /* 4 bytes hole on 64bits arches */
+        const char *mnt_devname;	/* Name of device e.g. /dev/dsk/hda1 */
+        struct list_head mnt_list;
+        struct list_head mnt_expire;	/* link in fs-specific expiry list */
+        struct list_head mnt_share;	/* circular list of shared mounts */
+        struct list_head mnt_slave_list;/* list of slave mounts */
+        struct list_head mnt_slave;	/* slave list entry */
+        struct vfsmount *mnt_master;	/* slave is on master->mnt_slave_list */
+        struct mnt_namespace *mnt_ns;	/* containing namespace */
+        int mnt_id;			/* mount identifier */
+        int mnt_group_id;		/* peer group identifier */
+        /*
+        * We put mnt_count & mnt_expiry_mark at the end of struct vfsmount
+        * to let these frequently modified fields in a separate cache line
+        * (so that reads of mnt_flags wont ping-pong on SMP machines)
+        */
+        atomic_t mnt_count;
+        int mnt_expiry_mark;		/* true if marked for expiry */
+        int mnt_pinned;
+        int mnt_ghosts;
+    #ifdef CONFIG_SMP
+        int __percpu *mnt_writers;
+    #else
+        int mnt_writers;
+    #endif
+    };
+    ```
+
+- ``path``
+
+    ```c++
+    struct path {
+        struct vfsmount *mnt;
+        struct dentry *dentry;
+    };
+    ```
+
+- ``fs_struct``
+
+    ```c++
+    struct fs_struct {
+        int users;
+        rwlock_t lock;
+        int umask;
+        int in_exec;
+        struct path root, pwd;
+    };
+    ```
+
+- ``inode``
+
+- ``super_block``
+
+- ``vs_area_struct``
+
+### 进程管理
+
+- ``task_struct``
+
 ## 3. 文件 I/O
 
 ### ``open`` ``openat``
@@ -318,6 +534,7 @@ int puts(const char *str);
 ```c++
 size_t fread(void *restrict ptr, size_t size, size_t nobj, FILE *restrict fp);
 size_t fwrite(const void *restrict ptr, size_t size, size_t nobj, FILE *restrict fp);
+
 // 只能在同一系统，原因有二：
 // 同一个结构，不同的系统，可能会有不同的布局
 // 不同系统的浮点数二进制格式可能也不相同
@@ -349,7 +566,6 @@ int snprintf(char *restrict buf, size_t n, const char *restrict format, ...);
 int scanf(const char *restrict format, ...);
 int fscanf(FILE *restrict fp, const char *restrict format, ...);
 int sscanf(const char *restrict buf, const char *restrict format, ...);
-
 ```
 
 ### 实现细节
@@ -372,6 +588,77 @@ FILE *fmemopen(void *restrict buf, size_t size, const char *restrict type);
 ```
 
 ## 进程控制
+
+### `fork` `vfork` `clone`
+
+- 调用方式
+
+    ```c++
+    pid_t fork(void);
+    pid_t vfork(void);
+    pid_t clone(int (*fn)(void *), void *child_stack, int flags, void *arg, ...);
+
+    // ... -> do_fork -> copy_process
+    ```
+
+- 源码剖析
+
+    ```c++
+    // copy_process -> copy_files -> dup_fd
+
+    // -------------------copy_files 代码截取-------------------
+    ...
+
+    if (clone_flags & CLONE_FILES) {
+        atomic_inc(&oldf->count);
+        goto out;
+    }   // 可以看到这里如果标记了CLONE_FILES，子进程不会创建一个新的files_struct实例，能够实现高效的进程分叉
+
+    newf = dup_fd(oldf, &error);
+
+    // -------------------dup_fd 代码截取-------------------
+
+	for (i = open_files; i != 0; i--) {
+		struct file *f = *old_fds++;
+		if (f) {
+			get_file(f); // 这里只是增加了对应file结构体的引用计数，而没有产生真的复制，所以fork出来的子进程实际上会共享父进程的打开文件副本
+		} else {
+			FD_CLR(open_files - i, new_fdt->open_fds);
+		}
+		rcu_assign_pointer(*new_fds++, f);
+	}
+    ...
+
+    ```
+
+### `wait`
+
+```c++
+pid_t wait(int *status);
+pid_t waitpid(pid_t pid, int *status, int options);
+
+// waitpid可以指定要回收的进程，并且通过options参数实现了更精细的控制
+
+/*
+WNOHANG         ： 使waitpid成为非阻塞调用，如果指定的子进程没有结束，waitpid会立即返回0
+WUNTRACED       ： 除了返回已终止的子进程信息外，还返回因信号而停止的子进程的信息
+WCONTINUED      ： 返回哪些已经由停止状态继续执行但还未终止的子进程状态
+WNOWAIT         ：（在某些系统中支持）是的调用清除子进程的状态，子进程状态仍然可以用于后续的waitpid调用
+*/
+
+int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options);
+
+// idtype : P_PID, P_PGID, P_ALL
+// options     ： WCONTINUED WEXITED WNOHANG WNOWAIT WSTOPPED  能够实现更精细的控制
+
+pid_t wait3(int *statloc, int options, struct rusage *rusage);
+pid_t wait4(pid_t pid, int *staloc, int options, struct rusage *rusage);
+// 通过rusage能够返回更多的信息
+```
+
+### ``exec``
+
+![exec族函数关系](./imags/exec.png)
 
 ## 进程关系
 

@@ -3,17 +3,46 @@
 #include <memory>
 #include <dlfcn.h>
 
+class A {
+public:
+    A() {
+        std::cout << "A ctor" << std::endl;
+    }
+};
 
-int main() {
-    std::cout << "pre open" << std::endl;
-
-    void *dl = dlopen("./libfoo.so", RTLD_NOW);
-
-    if(dl == nullptr) {
-        std::cout << "can not open" << std::endl;
+class B {
+public:
+    B() {
+        std::cout << "B ctor" << std::endl;
     }
 
-    std:: cout << "after open" << std::endl;
+    B(int) {
+        std::cout << "B ctor" << std::endl;
+    }
+};
 
-    dlclose(dl);
+class C {
+public:
+    C() {
+        std::cout << "C ctor" << std::endl;
+    }
+};
+
+class Widget {
+public:
+    Widget() : b(1), a(), c(){
+
+    }
+private:
+    A a;
+    B b;
+    C c;
+};
+
+
+
+int main() {
+
+    Widget w;
+
 }

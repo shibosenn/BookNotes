@@ -464,6 +464,30 @@ size_t fwrite(const void *ptr, size_t size, size_t nmeb, FILE *stream);
 
     ```
 
+- ``example case``
+
+    ```c++
+    // 通过_exit退出，不会冲刷缓冲区
+    // 通过exit退出，会冲刷缓冲区，但是不会关闭文件流
+    FILE *file = fopen("./test_exit.txt", "w");
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork failed");
+        fclose(file);
+        return EXIT_FAILURE;
+    } else if (pid == 0) {
+        fprintf(file, "This is written by the child process using exit.\n");
+        exit(0);  // 正常关闭流并冲刷缓冲区
+    } else {
+        fprintf(file, "This is written by the parent process using _exit.\n");
+        wait(NULL);
+        _exit(0);  // 不冲刷缓冲区，直接退出
+    }
+    // 这里可以看出来通过_exit直接退出，不会冲刷缓冲区，并且可以看出来父子进程的用户空间的缓冲区是不一样的
+    // c++11 引入了quick_exit，不执行析构函数而只是使得程序终止，和exit一样，同属于正常的退出
+    ```
+
 - `__run_exit_handlers` 和 `do_exit` 分别执行的清理工作
     - ``__run_exit_handlers`` 执行的清理工作是用户级的
     - ``do_exit`` 是内核空间的清理，主要包括回收进程的内存页、进程描述符、关闭文件描述符、子进程处理、调度器交互等
@@ -649,62 +673,22 @@ fork/vfork/clone -> do_fork -> copy_porcess -> copy_semundo/files/fs/sighand/sig
         WEXITED：等待子进程的终止事件
         WSTOPED：等待被信号暂停的子进程事件
         WCONTINUED：等待被暂停，但是被SIGCONT信号恢复执行的子进程
-        WNOWAiT：只负责获取信息，不要改变子进程的状态
+        WNOWAIT：只负责获取信息，不要改变子进程的状态
     */
     ```
 
+- ``do_exit``中， 进程会释放基本所有的资源，但是还有两桩心愿：
+
+    - 作为父亲进程，谁为他的子进程收尸
+    - 作为子进程，需要通知父进程为自己收尸
+
     ```c++
-    SYSCALL_DEFINE4(wait4, pid_t, upid, int __user *, stat_addr, int, options, struct rusage __user *, ru)
-    {
-        struct wait_opts wo;
-        struct pid *pid = NULL;
-        enum pid_type type;
-        long ret;
+    // do_exit -> exit_notify -> (forget_original_parent, do_notify_parent)
 
-        if (options & ~(WNOHANG|WUNTRACED|WCONTINUED|
-                __WNOTHREAD|__WCLONE|__WALL))
-            return -EINVAL;
+    // 多线程的情况，只有线程组的主线程才有资格通知父进程，线程组的其他线程终止的时候，不需要通知父进程
+    // 如果主线程先死了，但是其他线程还没有终止，那么会在最后一个线程退出的时候通知父进程
 
-        if (upid == -1)
-            type = PIDTYPE_MAX;
-        else if (upid < 0) {
-            type = PIDTYPE_PGID;
-            pid = find_get_pid(-upid);
-        } else if (upid == 0) {
-            type = PIDTYPE_PGID;
-            pid = get_task_pid(current, PIDTYPE_PGID);
-        } else /* upid > 0 */ {
-            type = PIDTYPE_PID;
-            pid = find_get_pid(upid);
-        }
-
-        wo.wo_type	= type;
-        wo.wo_pid	= pid;
-        wo.wo_flags	= options | WEXITED;
-        wo.wo_info	= NULL;
-        wo.wo_stat	= stat_addr;
-        wo.wo_rusage	= ru;
-        ret = do_wait(&wo);
-        put_pid(pid);
-
-        /* avoid REGPARM breakage on x86: */
-        asmlinkage_protect(4, ret, upid, stat_addr, options, ru);
-        return ret;
-    }
     ```
-
-    - ``do_exit``中， 进程会释放基本所有的资源，但是还有两桩心愿：
-
-        - 作为父亲进程，谁为他的子进程收尸
-        - 作为子进程，需要通知父进程为自己收尸
-
-        ```c++
-        // do_exit -> exit_notify -> (forget_original_parent, do_notify_parent)
-
-        // 多线程的情况，只有线程组的主线程才有资格通知父进程，线程组的其他线程终止的时候，不需要通知父进程
-        // 如果主线程先死了，但是其他线程还没有终止，那么会在最后一个线程退出的时候通知父进程
-
-        ```
 
 ### 等待子进程
 
