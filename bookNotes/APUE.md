@@ -27,9 +27,43 @@
 
     用于告知编译器一个指针式访问数据对象的唯一且初始的方式，这能够使得编译器假设指针所指向的数据不会被其他指针所改变，从而带来更好的编译优化效果
 
+- ``offsetof`` ``coniner_of``
+
+    ```c++
+    #define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER) // 把0地址强制转化为type类型，然后取成员地址，转化成为偏移即可
+    #define container_of(ptr, type, member) ({          \
+        const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
+        (type *)( (char *)__mptr - offsetof(type, member) );})
+
+    ```
+
 ## 00. Linux 中常见的数据结构
 
 ### 基础数据结构
+
+- 链表
+
+    >如果链表不能包容万物，就让万物包容链表
+
+    ```c++
+    struct list_head {
+        struct list_head *next, *prev;
+    };
+    ```
+
+- 哈希表
+
+    ```c++
+    struct hlist_head {
+        struct hlist_node *first;
+    };
+
+    struct hlist_node {
+        struct hlist_node *next, **pprev;
+    };
+
+    // 通过这种设计，可以优化内存使用
+    ```
 
 ### 并发控制
 
@@ -141,10 +175,9 @@
     struct dentry {
         atomic_t d_count;
         unsigned int d_flags;		/* protected by d_lock */
-        spinlock_t d_lock;		/* per dentry lock */
+        spinlock_t d_lock;		    /* per dentry lock */
         int d_mounted;
-        struct inode *d_inode;		/* Where the name belongs to - NULL is
-                        * negative */
+        struct inode *d_inode;		/* Where the name belongs to - NULL is negative */
         /*
         * The next three fields are touched by __d_lookup.  Place them here
         * so they all fit in a cache line.
@@ -166,7 +199,7 @@
         unsigned long d_time;		/* used by d_revalidate */
         const struct dentry_operations *d_op;
         struct super_block *d_sb;	/* The root of the dentry tree */
-        void *d_fsdata;			/* fs-specific data */
+        void *d_fsdata;			    /* fs-specific data */
 
         unsigned char d_iname[DNAME_INLINE_LEN_MIN];	/* small names */
     };
