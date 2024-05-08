@@ -37,6 +37,37 @@
 
     ```
 
+- ``__user`` ``__kernel`` ``__iomem``
+
+    保证指针空间必须在用户/内核/设备地址空间
+
+- ``LDREX`` ``STREX``
+
+    ```c++
+    /*
+    LDREX : Load Register Exclusive
+    STREX : Store Register Exclusive
+
+
+    ldrex 指令从内存中加载一个值到寄存器，并标记该内存地址开始一个独占访问。这意味着该指令告诉处理器，接下来对这个地址的操作希望是独占的，即在本次 ldrex 操作和接下来的 strex 操作完成之前，不希望其他处理器对这个地址进行写操作。
+
+    strex 指令尝试将一个寄存器的值存储到先前由 ldrex 指令标记为独占的内存地址。如果自 ldrex 执行以来没有其他处理器写入该内存地址，strex 将写入成功，并返回 0；如果有其他处理器介入修改了该地址，则 strex 写入失败，返回非零值。
+
+    STERXPL STREXEQ 是拓展的条件执行版本，允许在满足特定条件的情况下才执行存储操作
+    */
+    ```
+
+- 内嵌汇编指令
+
+    ```c++
+    // 基本语法如下所示：
+    asm volatile (assembly code : output operands : input operands : clobbered registers); // volatile 可选，告诉编译器不要优化这段编译代码
+
+    // 操作数约束 r(寄存器) m(内存) g(编译器选择最合适的方式) i(立即数) ...
+    // 特殊约束操作符 =(约束的是一个输出操作数) &(通常和=搭配使用，表示不能与任何输入操作数共享寄存器)
+    // 按顺序使用 %0， %1 ... 引用操作数
+    ```
+
 ## 00. Linux 中常见的数据结构
 
 ### 基础数据结构
@@ -76,11 +107,364 @@
     // volatile 关键字保证编译器不在进行优化，系统总是重新从他所在的内存读取数据
     ```
 
+    单处理器系统中，处理器的执行流程只会收到中断机制的影响，因此可以通过 “提供能完成多步操作的单条指令” 或者 ”关中断“ 的方式实现原子操作
+
+    多处理器系统中，即使是一条指令执行的期间也会收到其他干扰，不同架构提供了不同的实现原子操作的方式，比如 **X86** 架构可以通过对总线加锁保证只允许一个处理器访问， **ARM** 可以通过独占内存实现， RISC-V 可以通过 **CAS** 实现原子操作
+
+    ```c++
+    // X86 架构实现
+    static inline void atomic_add(int i, atomic_t *v)
+    {
+        asm volatile(LOCK_PREFIX "addl %1,%0"
+                : "+m" (v->counter)
+                : "ir" (i));
+    }
+
+    // ARM 架构实现
+    static inline int atomic_add_return(int i, atomic_t *v)
+    {
+        unsigned long tmp;
+        int result;
+
+        smp_mb();
+
+        __asm__ __volatile__("@ atomic_add_return\n"
+    "1:	ldrex	%0, [%2]\n" // 独占内存指令
+    "	add	%0, %0, %3\n"
+    "	strex	%1, %0, [%2]\n"
+    "	teq	%1, #0\n"
+    "	bne	1b"
+            : "=&r" (result), "=&r" (tmp)
+            : "r" (&v->counter), "Ir" (i)
+            : "cc");
+
+        smp_mb();
+
+        return result;
+    }
+    ```
+
+- ``per-cpu``
+
+    静态的 ``per-cpu`` 变量会在链接时被放置在ELF文件的特定段 ``.data..percpu`` 中，所有变量的布局是连续的，从 ``__per_cpu_start`` 开始到 ``__per_cpu_end`` 结束，每个 **cpu** 都会有一个独立的内存副本。变量的访问通过计算偏移量实现，内核使用一个数组 ``__per_cpu_offset`` 存储每个 **cpu** 的偏移量。
+
+    动态的 ``per_cpu`` 变量通过内核的动态内存分配机制实现，内核维护了一个专用的 ``per_cpu`` 内存池实现
+
+- ``memory_barrier``
+
+    确保内存操作执行顺序符合预期，防止由于处理器乱序执行或者编译器优化策略导致数据不一致的静态条件
+
+    常见的比如 ``mb`` ``smp_mb`` ``smp_wmb`` ``smp_rmb``
+
+    ```c++
+    // 一些使用场景记录
+    
+    // case1: 多核数据共享
+    // Core 1
+    data = 42;
+    smp_wmb();  // 写内存屏障
+    flag = 1;
+
+    // Core 2
+    while (flag == 0);
+    smp_rmb();  // 读内存屏障
+    assert(data == 42);
+
+    // case2: 锁实现
+    lock();
+    smp_mb();  // 获取锁后的屏障
+    critical_section();
+    smp_mb();  // 释放锁前的屏障
+    unlock();
+    ```
+
 - ``spinlock_t``
+
+    ``spinlock_t`` 简化的定义如下所示
+
+    ```c++
+    typedef struct raw_spinlock {
+        arch_spinlock_t raw_lock;
+    } raw_spinlock_t;
+
+    typedef struct spinlock {
+        struct raw_spinlock rlock; 
+    } spinlock_t;
+    ```
+
+    `spin_lock` 源码解析
+
+    ```c++
+    static inline void spin_lock(spinlock_t *lock)
+    {
+        raw_spin_lock(&lock->rlock);
+    }
+
+    #define raw_spin_lock(lock)    _raw_spin_lock(lock)
+
+    // 在UP环境中，由于同一时刻只有一个执行线程，自旋锁主要通过禁用抢占和中断来保证代码块的原子执行，而不是通过真正的自旋等待。
+    // 在SMP环境中，自旋锁需要实现真正的自旋等待
+
+    // UP中的实现：
+    #define _raw_spin_lock(lock)            __LOCK(lock)
+    #define __LOCK(lock) \
+    do { preempt_disable(); __acquire(lock); (void)(lock); } while (0)
+
+    // 通过preempt_disable 可以禁止抢占
+    #define preempt_disable() \
+    do { \
+        inc_preempt_count(); \
+        barrier(); \
+    } while (0)
+
+    // __acquire(lock) 用作静态代码检查，确保成对使用，默认情况下是一个空语句
+    // (void)(lock) 空语句，防止编译器警告局部变量没有使用
+    // do{ ... } whle(0) 保证宏语法的正确性，保证正确的代码块闭合
+
+    // SMP的实现：
+    #define _raw_spin_lock(lock) __raw_spin_lock(lock)
+    static inline void __raw_spin_lock(raw_spinlock_t *lock)
+    {
+        preempt_disable();
+        spin_acquire(&lock->dep_map, 0, 0, _RET_IP_);
+        LOCK_CONTENDED(lock, do_raw_spin_trylock, do_raw_spin_lock);
+    }
+
+    static inline void do_raw_spin_lock(raw_spinlock_t *lock) __acquires(lock)
+    {
+        __acquire(lock);
+        arch_spin_lock(&lock->raw_lock);
+    }
+
+    // ARM 架构下的arch_spin_lock实现
+    typedef struct {
+        volatile unsigned int lock;
+    } arch_spinlock_t;
+
+    static inline void arch_spin_lock(arch_spinlock_t *lock)
+    {
+        unsigned long tmp;
+
+        __asm__ __volatile__(
+    "1:	ldrex	%0, [%1]\n"             // 加载并且标记锁变量，和原子变量的实现类似，通过独占内存指令实现
+    "	teq	%0, #0\n"                   // 测试锁是否为锁定状态，更新条件标志
+    #ifdef CONFIG_CPU_32v6K       
+    "	wfene\n"                        // wait for event指令，在自旋等待中减少能耗
+    #endif
+    "	strexeq	%0, %2, [%1]\n"         // 在 %0 为 0 的条件下执行，尝试将 %2 的值写入到lock中，并且把是否成功的信息保存在 0% 中
+    "	teqeq	%0, #0\n"               // 检查是否成功获取到锁
+    "	bne	1b"                         // 如果没有退回到1
+        : "=&r" (tmp)
+        : "r" (&lock->lock), "r" (1)
+        : "cc");
+
+        smp_mb();                       // 全屏障，确保在获取锁之后的任何指令不会被重排到获取锁之前
+    }
+
+    /*
+    实际上这种简单的实现，会带来极大的不公平性，由于存在缓存一致性的问题 ——> 释放锁之后，可能会导致其他cpu保存在 L1 Cache 中的数据失效，
+    从而释放锁变量的 cpu 能够有更大的机会获取锁，这是一种不公平的竞争，下面展示了一种新的定义方式
+    */
+    // ticket_based spin lock 
+    typedef struct {
+        union {
+            u32 slock;
+            struct __raw_tickets {
+                u16 next;  // 当前持有锁的票据号
+                u16 owner;   // 下一个将要获取锁的票据号
+            } tickets;
+        };
+    } arch_spinlock_t;
+
+    static inline void arch_spin_lock(arch_spinlock_t *lock)
+    {
+
+        /*
+        主要包括了三个动作：
+            * 或许了自己的号码牌（next值）和允许哪一个号码牌进入临界区（owner）
+            * 设定下一个进入临界区的号码牌（next++）
+            * 判断自己的号码牌是否是允许进入的那个号码牌，如果是则进入，不是则等待 
+        */
+
+        unsigned long tmp;
+        u32 newval;
+        arch_spinlock_t lockval;
+
+        prefetchw(&lock->slock);
+        __asm__ __volatile__(
+    "1:     ldrex   %0, [%3]\n"     /* 原子方式，读取锁的值赋值给lockval */
+    "       add     %1, %0, %4\n"   /* 将next字段++之后的值存在newval中 */
+    "       strex   %2, %1, [%3]\n" /* 原子方式，将新的值存在lock中，写入否成功结果存入在tmp中 */
+    "       teq     %2, #0\n"       /* 判断是否写入成功，不成功跳到标号1重新执行 */
+    "       bne     1b"
+            : "=&r" (lockval), "=&r" (newval), "=&r" (tmp)
+            : "r" (&lock->slock), "I" (1 << TICKET_SHIFT)
+            : "cc");
+
+        /* 查询是否可以拿锁，若next != owner说明已有人持锁，自旋 */
+        while (lockval.tickets.next != lockval.tickets.owner) {
+            wfe();
+            lockval.tickets.owner = READ_ONCE(lock->tickets.owner);
+        }
+    
+        smp_mb();   
+    }
+    
+    /* 释放锁比较简单，将owner++即可 */
+    static inline void arch_spin_unlock(arch_spinlock_t *lock)
+    {
+        smp_mb();
+        lock->tickets.owner++;
+        dsb_sev();
+    }
+
+    /*
+    实际上针对不同的中断类型，spin_lock给出了不同的接口
+    不会在任何中断例程中操作临界区: spin_lock
+    软件/硬件中断可能会操作临界区: spin_lock_bh/spin_lock_irq
+    ...
+    */
+
+    ```
+
+- ``rwlock_t``
+
+    简化的定义如下所示：
+
+    ```c++
+    typedef struct {
+        arch_rwlock_t raw_lock;
+    } rwlock_t;
+    
+    // arm 架构下的定义如下
+    typedef struct {
+	    volatile unsigned int lock;
+    } arch_rwlock_t;
+    ```
+
+    具体实现分析
+
+    ```c++
+    // UP环境下的rwlock实现和UP环境的spinlock实现没有区别
+
+    // arch/arm/include/asm/spinlock.h
+    // rwlock 的 write_lock 和 write_unlock 的实现和 spin_lock基本一致，最终会进入到arch_write_lock函数
+    static inline void arch_write_lock(arch_rwlock_t *rw)
+    {
+        unsigned long tmp;
+
+        __asm__ __volatile__(
+            ...
+        : "r" (&rw->lock), "r" (0x80000000)
+        // 写入0x0x80000000表示被一个写者拥有
+        : "cc");
+
+        smp_mb();
+    }
+
+    static inline void arch_write_unlock(arch_rwlock_t *rw)
+    {
+        smp_mb();
+
+        __asm__ __volatile__(
+        "str	%1, [%0]\n"
+        :
+        : "r" (&rw->lock), "r" (0)
+        : "cc");
+
+        dsb_sev(); // barrier + send event
+    }
+
+    static inline void arch_read_lock(arch_rwlock_t *rw)
+    {
+        unsigned long tmp, tmp2;
+
+        __asm__ __volatile__(
+    "1:	ldrex	%0, [%2]\n"             // 把rw->lock的值加载到寄存器 %0 中                  
+    "	adds	%0, %0, #1\n"           // 将 %0 寄存器中的值加 1 同时更新条件标志位
+    "	strexpl	%1, %0, [%2]\n"         // strexpl指令会在满足条件（之前的adds指令没有被设置负标志）执行
+    #ifdef CONFIG_CPU_32v6K
+    "	wfemi\n"                        // 在支持该指令的架构中，减少等待循环的能耗，使处理器进入一个事件等待模式
+    #endif
+    "	rsbpls	%0, %1, #0\n"           // 如果上一条strex指令不成功， %1 不为 0，这条指令把 %0 设置为 -%1，如果成功，不执行该指令
+    "	bmi	1b"                         // 如果最后的结果为负，重回1
+        : "=&r" (tmp), "=&r" (tmp2)
+        : "r" (&rw->lock)
+        : "cc");
+
+        smp_mb();
+    }
+
+    static inline void arch_read_unlock(arch_rwlock_t *rw)
+    {
+        unsigned long tmp, tmp2;
+
+        smp_mb();
+
+        __asm__ __volatile__(
+    "1:	ldrex	%0, [%2]\n"
+    "	sub	%0, %0, #1\n"
+    "	strex	%1, %0, [%2]\n"
+    "	teq	%1, #0\n"
+    "	bne	1b"
+        : "=&r" (tmp), "=&r" (tmp2)
+        : "r" (&rw->lock)
+        : "cc");
+
+        if (tmp == 0)
+            dsb_sev();
+    }
+    ```
 
 - ``seqlock_t``
 
-- ``rwlock_t``
+    >读操作不用加锁，，写操作通过自旋锁保护，非常适合读多写少的场景
+
+    通过奇偶性判断是否存在写进程
+
+    ```c++
+    typedef struct {
+        unsigned sequence;
+        spinlock_t lock;
+    } seqlock_t;
+
+    static inline void write_seqlock(seqlock_t *sl)
+    {
+        spin_lock(&sl->lock);
+        ++sl->sequence;
+        smp_wmb();  // 确保序列号增加操作完成
+    }
+
+    static inline void write_sequnlock(seqlock_t *sl)
+    {
+        smp_wmb();  // 确保写操作完成
+        sl->sequence++;
+        spin_unlock(&sl->lock);
+    }
+
+    static __always_inline unsigned read_seqbegin(const seqlock_t *sl)
+    {
+        unsigned ret;
+
+    repeat:
+        ret = sl->sequence;
+        smp_rmb();
+        if (unlikely(ret & 1)) {
+            cpu_relax();
+            goto repeat;
+        }
+
+        return ret;
+    }
+
+    static __always_inline int read_seqretry(const seqlock_t *sl, unsigned start)
+    {
+        smp_rmb();
+
+        return (sl->sequence != start);
+    }
+
+    ```
 
 - ``mutex``
 
