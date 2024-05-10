@@ -262,6 +262,15 @@
     }
 
     /*
+    实际上针对不同的中断类型，spin_lock给出了不同的接口
+    不会在任何中断例程中操作临界区: spin_lock
+    软件/硬件中断可能会操作临界区: spin_lock_bh/spin_lock_irq
+    ...
+    */
+
+    /*************************************ticket_based spin lock*************************************/
+
+    /*
     实际上这种简单的实现，会带来极大的不公平性，由于存在缓存一致性的问题 ——> 释放锁之后，可能会导致其他cpu保存在 L1 Cache 中的数据失效，
     从而释放锁变量的 cpu 能够有更大的机会获取锁，这是一种不公平的竞争，下面展示了一种新的定义方式
     */
@@ -281,7 +290,7 @@
 
         /*
         主要包括了三个动作：
-            * 或许了自己的号码牌（next值）和允许哪一个号码牌进入临界区（owner）
+            * 获取了自己的号码牌（next值）和允许哪一个号码牌进入临界区（owner）
             * 设定下一个进入临界区的号码牌（next++）
             * 判断自己的号码牌是否是允许进入的那个号码牌，如果是则进入，不是则等待 
         */
@@ -303,7 +312,7 @@
 
         /* 查询是否可以拿锁，若next != owner说明已有人持锁，自旋 */
         while (lockval.tickets.next != lockval.tickets.owner) {
-            wfe();
+            wfe();  // 降低等待消耗
             lockval.tickets.owner = READ_ONCE(lock->tickets.owner);
         }
     
@@ -318,13 +327,75 @@
         dsb_sev();
     }
 
-    /*
-    实际上针对不同的中断类型，spin_lock给出了不同的接口
-    不会在任何中断例程中操作临界区: spin_lock
-    软件/硬件中断可能会操作临界区: spin_lock_bh/spin_lock_irq
-    ...
-    */
+    /*************************************MSC spin lock*************************************/
 
+    // ticket_based spin lock 解决了公平性的问题，但是在性能上还存在一些问题。由于多个 CPU 线程均在同一个共享变量 lock.slock 上自旋，
+    // 而申请和释放必须对 lock.slock 进行修改，这将导致所有参与排队的处理器的缓存变得无效，在锁竞争激烈的情况下，频繁的缓存同步操作将会导致
+    // 饭中的系统总线和内存流量，大大降低系统性能
+
+    // MSC spin lock 设计思想：每个锁的等待者在本 CPU 上自旋，访问本地变量，而不是全局的 spinlock 变量
+
+    /*
+    * struct mcs_node结构体用于描述本地节点，mcs_node中包含2个变量，next指针用于指向下一个等待者，而另外一个变量，则用于自旋锁的自旋。
+    * 很明显，mcs_node结构可以让所有等待者变成一个单向链表。
+    */
+    struct mcs_node {
+        struct mcs_node *next;   /* 指向下一个等待者，通过这种方式能够减少缓存行的震荡 */
+        int is_locked;           /* 本地自旋变量 */
+    }
+    
+    /*
+    * 全局spinlock中含有一个mcs_node指针，指向最后一个锁的申请者。而当锁处于空闲时，该指针为NULL。
+    */
+    struct spinlock_t {
+        mcs_node *queue;    
+    }
+    
+    //加锁函数
+    mcs_spin_lock(spinlock_t *lock, mcs_node *my_node)
+    {
+        my_node->next = NULL;               
+        mcs_node *predecessor = fetch_and_store(lock->queue, my_node);  
+        if (predecessor != NULL) {        
+            my_node->is_locked = true;     
+            predecessor.next = my_node;   
+            while (my_node->is_locked)     
+                cpu_relax();
+        }
+    }
+
+
+    //放锁函数
+    mcs_spin_unlock(spinlock_t *lock, mcs_node *my_node)
+    {
+        if (my_node->next == NULL) {        
+            if (compare_and_swap(lock->queue, my_node, NULL)) { 
+                return;
+            }
+            else {
+                while (my_node->next == NULL) 
+                    cpu_relax();
+            }
+        }
+        my_node->next->is_locked = false;    
+    }
+
+    /*************************************Queue spin lock*************************************/ 
+
+    typedef struct qspinlock {
+	union {
+		atomic_t val;
+ 
+        struct {
+            u8	locked;
+            u8	pending;
+        };
+        struct {
+            u16	locked_pending;
+            u16	tail;
+        };
+    }
+    } arch_spinlock_t;
     ```
 
 - ``rwlock_t``
@@ -418,7 +489,7 @@
 
 - ``seqlock_t``
 
-    >读操作不用加锁，，写操作通过自旋锁保护，非常适合读多写少的场景
+    >读操作不用加锁，写操作通过自旋锁保护，非常适合读多写少的场景
 
     通过奇偶性判断是否存在写进程
 
@@ -466,11 +537,16 @@
 
     ```
 
-- ``mutex``
+- ``rcu``
 
-- ``rw_semaphore``
+    随着计算机硬件技术的发展，CPU运算速度越来越快，相比之下， 存储器件的速度发展较为滞后，在这种背景下，获取基于 **Counter** 机制的锁的开销比较大，无法满足性能的需求
 
-- ``rcu-head``
+    适用场景
+
+    - RCU 只能保护动态分配的数据结构，并且必须是通过指针访问该数据结构
+    - RCU 保护的临界区内不能 **sleep**
+    - 读写不对称，对写的性能没有特别要求，但是对读的性能要求极高
+    - 读端对新旧数据不敏感
 
     ```c++
     /**
@@ -478,11 +554,37 @@
     * @next: next update requests in a list
     * @func: actual update function to call after the grace period.
     */
-    struct rcu_head { // read-copy update  -> 随意读，但更新数据的时候，需要先复制一份副本，在副本上修改，在一次性的替换旧数据
+    struct rcu_head { // read copy update  -> 随意读，但更新数据的时候，需要先复制一份副本，在副本上修改，在一次性的替换旧数据
         struct rcu_head *next;
         void (*func)(struct rcu_head *head);
     };
     ```
+
+- ``mutex``
+
+    ```c++
+    struct mutex {
+        atomic_long_t		owner;              //原子计数，用于指向锁持有者的task struct结构
+        spinlock_t		wait_lock;              //自旋锁，用于wait_list链表的保护操作
+    #ifdef CONFIG_MUTEX_SPIN_ON_OWNER
+        struct optimistic_spin_queue osq;       //osq锁
+    #endif
+        struct list_head	wait_list;          //链表，用于管理所有在该互斥锁上睡眠的进程
+        ...                                     // for Debug
+    };
+
+    /*
+    Fast-path:
+        这是最快的路径，当没有竞争时使用。它尝试通过一个原子操作（通常是 cmpxchg）直接将 owner 设置为当前任务。如果成功，进程就获取了锁而不需要进一步的操作。
+    Mid-path:
+        如果 fast-path 失败，互斥锁代码将尝试 mid-path，其中包括使用 OSQ 锁。这时，系统会检查锁的持有者是否正在运行在同一 CPU 上。如果是，执行自旋等待，因为锁很可能很快就会被释放。
+    Slow-path:
+        如果锁不能在 mid-path 被获取，控制流进入 slow-path。在这个路径上，进程将被加入到 wait_list，并进入睡眠状态，直到锁变为可用。这需要对 wait_list 进行加锁操作，通常使用 wait_lock。
+
+    */
+    ```
+
+- ``rw_semaphore``
 
 ### 文件管理
 
@@ -1079,11 +1181,657 @@ pid_t wait4(pid_t pid, int *staloc, int options, struct rusage *rusage);
 
 ## 进程关系
 
+### 进程组
+
+```c++
+// 作为一个统一接受信号的集合
+// 每个进程组有一个组长进程，组长进程的进程组id和进程id相等，没有自动组长替代机制，如果组长进程终止或者离开进程组，不会产生新的组长
+// 只要某个进程组中有一个进程存在，则该进程组就存在
+
+pid_t getpgid(pid_t pid);
+int setpgid(pid_t pid, pid_t pgid);
+// 如果两个参数相等，那么pid指定的进程变成进程组组长
+// 如果pid为0，那么为自己指定进程组，如果pgid为0，那么pid指定的进程id用作进程组id
+// 一个进程只能为它或它的子进程设置进程组ID，在他的子进程调用了exec之后就不能再更改子进程的进程组ID
+```
+
+### 会话
+
+```c++
+pid_t setsid(void);
+/*
+如果此函数的进程不是一个进程组的组长，则此函数创建一个新会话，具体发生下面三件事
+    * 该进程变成新会话的首进程
+    * 该进程成为一个新进程组的组长进程
+    * 该进程没有控制终端，如果在调用setsid之前该进程有一个控制终端，那么这种联系也被切断
+*/
+pid_t getsid(pid_t pid);
+// 如果pid并不属于调用者所在的会话，那么调用进程就不能得到该会话首进程进程组ID
+```
+
+### 控制终端
+
+一个会话可以有一个控制终端
+
+建立与控制终端连接的会话首进程被称为控制进程
+
+一个会话中进程组可以被分为前台进程组和多个后台进程组
+
+无论何时键入终端的中断键或是退出键，都会将退出信号发送至前台进程组的所有进程
+
 ## 信号
+
+### 信号说明
+
+```c++
+#define SIGHUP          1   // 终端控制进程结束时发送给相应进程
+#define SIGINT          2   // 中断信号，通常由用户在终端按下Ctrl+C触发
+#define SIGQUIT         3   // 退出信号，由Ctrl+\触发，通常导致进程终止并产生核心转储
+#define SIGILL          4   // 非法指令信号，执行非法指令时发送
+#define SIGTRAP         5   // 由断点指令或其他陷阱指令产生
+#define SIGABRT         6   // 由abort()函数产生，退出信号
+#define SIGIOT          6   // 同SIGABRT，退出信号
+#define SIGBUS          7   // 总线错误，非法地址访问
+#define SIGFPE          8   // 浮点异常，如除零操作
+#define SIGKILL         9   // 杀死信号，用于立即结束程序执行   不能被忽略
+#define SIGUSR1        10   // 用户自定义信号1
+#define SIGSEGV        11   // 段错误信号，如访问未分配的内存
+#define SIGUSR2        12   // 用户自定义信号2
+#define SIGPIPE        13   // 向一个没有读端的管道写数据
+#define SIGALRM        14   // 由alarm()函数设置的定时器超时时发送
+#define SIGTERM        15   // 终止信号，用于结束程序
+#define SIGSTKFLT      16   // 栈故障
+#define SIGCHLD        17   // 子进程结束或停止时，发送给其父进程，默认行为是忽略
+#define SIGCONT        18   // 使停止的进程继续执行
+#define SIGSTOP        19   // 停止进程的执行，非终止         不能被忽略
+#define SIGTSTP        20   // 停止信号，如Ctrl+Z
+#define SIGTTIN        21   // 后台进程读终端
+#define SIGTTOU        22   // 后台进程写终端
+#define SIGURG         23   // 紧急情况信号，如网络上的紧急数据到达
+#define SIGXCPU        24   // 超过CPU时间限制
+#define SIGXFSZ        25   // 超过文件大小限制
+#define SIGVTALRM      26   // 虚拟定时器到期
+#define SIGPROF        27   // 实际时间定时器到期
+#define SIGWINCH       28   // 窗口大小变化
+#define SIGIO          29   // I/O现在可能进行
+#define SIGPOLL        SIGIO  // 同SIGIO，轮询可能发生
+#define SIGPWR         30   // 电源故障
+#define SIGSYS         31   // 非法的系统调用
+#define SIGUNUSED      31   // 未使用的信号（不再使用）
+#define SIGRTMIN       32   // 实时信号范围的最小值
+#define SIGRTMAX       _NSIG  // 实时信号范围的最大值，具体数值取决于系统
+
+```
+
+### ``signal`` 函数
+
+```c++
+void (*signal(int signo, void (*func)(int)))(int);
+// 成功返回以前的信号处理配置，出错返回SIG_ERR
+// SIG_IGN  -> #define SIG_IGN (void (*)()) 1表示忽略信号
+// SIG_DFL  -> #define SIG_DFL (void (*)()) 0表示将信号的处理方式回复默认行为
+
+
+// 启动一个程序的时候所有信号的状态都是系统默认或忽略，创建进程的时候，子进程会继承父进程的信号处理方式
+// 信号处理函数不能调用不可重入函数，不然可能会导致不可预计的后果，调用 malloc 可能会导致死锁（重复获取不可重入锁）
+```
+
+### ``kill`` 和 ``raise``
+
+```c++
+int kill(pid_t pid, int signo);
+/*
+    pid > 0 将信号发送给进程ID为pid的进程
+    pid = 0 将信号发送给同组进程，要有权限
+    pid < 0 按组发送信号
+    pid = -1 将信号发送给所有有权限发送的进程  
+*/
+int raise(int signo);
+```
+
+### ``alarm`` 和 ``pause``
+
+```c++
+unsigned int alarm(unsigned int seconds);
+// 在将来某个时刻决定定时器会超时，产生SIGALRM信号，如果忽略或不捕获此信号，默认是终止调用alarm的进程
+// 一个进程只能有一个闹钟时间，如果在调用alarm的时候，之前为该进程注册的闹钟函数还没有超时，则返回上次的剩余时间，并且更新新的alarm值
+
+int pause(void);
+// 只有执行了一个信号处理函数并且从其返回时候，pause才返回，在这种情况，pause返回-1，errno设置为EINTR
+```
+
+### 信号集
+
+```c++
+int sgiemptyset(sigset_t *set);
+int sigfillset(sigset_t *set);
+int sigaddset(sigset_t *set, int signo);
+int sigdelset(sigset_t *set, int signo);
+int sigismember(const sigset_t *set, int signo);
+```
+
+### ``sigprocmask``
+
+```c++
+int sigprocmask(int how, const sigset_t *restrict set, sigset_t *restrict oset);
+// how 决定了如何修改当前的信号屏蔽字
+// SIG_BLOCK
+// SIG_UNBLOCK
+// SIG_SETMASK
+```
+
+### ``sigpending``
+
+```c++
+int sigpending(sigset_t *set);
+// 用于检查当前进程的挂起信号，可以了解哪些信号已经发送给进程但是由于某种原因尚未被处理
+```
+
+### ``sigaction``
+
+```c++
+int sigaction(int signo, const struct sigaction *restrict act, struct sigaction *restrict oact);
+
+struct sigaction {
+    void     (*sa_handler)(int);
+    void     (*sa_sigaction)(int, siginfo_t *, void *);     // 另一个信号处理函数，提供了更多信息传递
+    sigset_t   sa_mask;                                     // 指定在当前信号处理函数执行期间需要阻塞的附加信号
+    int        sa_flags;            // 信号处理的各种选项和行为，常见的有SA_RESTART SA_NOCLDSTOP SA_SIGINFO
+    void     (*sa_restorer)(void);  // 不再使用的字段
+};
+
+typedef struct siginfo {
+    int      si_signo;     /* Signal number */
+    int      si_errno;     /* An errno value */
+    int      si_code;      /* Signal code */
+    int      si_trapno;    /* Trap number that caused
+                              hardware-generated signal
+                              (unused on most architectures) */
+    pid_t    si_pid;       /* Sending process ID */
+    uid_t    si_uid;       /* Real user ID of sending process */
+    int      si_status;    /* Exit value or signal */
+    clock_t  si_utime;     /* User time consumed */
+    clock_t  si_stime;     /* System time consumed */
+    sigval_t si_value;     /* Signal value */
+    int      si_int;       /* POSIX.1b signal */
+    void    *si_ptr;       /* POSIX.1b signal */
+    int      si_overrun;   /* Timer overrun count; POSIX.1b timers */
+    int      si_timerid;   /* Timer ID; POSIX.1b timers */
+    void    *si_addr;      /* Memory location which caused fault */
+    long     si_band;      /* Band event */
+    int      si_fd;        /* File descriptor */
+    short    si_addr_lsb;  /* Least significant bit of address
+                              (since Linux 2.6.32) */
+} siginfo_t;
+
+```
+
+### ``abort``
+
+此函数将 ``SIGABRT`` 信号发送给调用进程，ISO C 要求若捕捉次信号而且相应信号处理程序返回， ``abort`` 仍不会回到其调用者
 
 ## 线程
 
+### 线程**Id**
+
+```c++
+int pthread_equal(pthread_t tid1, pthread_t tid2);
+pthread_t pthread_self(void);
+```
+
+### 线程创建
+
+```c++
+int pthread_create(pthread_t *restrict tidp, const pthread_attr_t *restrict attr, void *(*start_rtn)(void *), void *restrict arg);
+/*
+tidp:       指向 pthread_t 类型的指针，该类型用于唯一标识新创建的线程。成功创建线程后，该标识符被写入此位置。
+attr:       指向 pthread_attr_t 结构的指针，该结构定义了线程的属性（如堆栈大小、调度策略等）。如果传递 NULL，则使用默认线程属性。
+start_rtn   指向函数的指针，该函数作为线程启动时执行的新例程。函数必须接受一个 void 类型的指针，并返回一个 void 类型的指针。
+arg:        传递给 start_rtn 函数的单一参数。这可以用来提供多种数据给线程。
+*/
+
+/*
+pthread_attr_t:     一个用于线程属性的数据结构。它通常在创建线程之前设置，并可以指定线程的多种属性，如堆栈大小、调度策略、继承调度、作用域等。
+
+常用函数:
+- pthread_attr_init:          初始化 pthread_attr_t 结构体到默认值。
+- pthread_attr_destroy:       释放 pthread_attr_t 结构体占用的资源。
+- pthread_attr_set/getstacksize:  设置线程的堆栈大小。
+- pthread_attr_set/getscope:      设置线程的作用域（系统或进程间）。
+- pthread_attr_set/getschedpolicy:设置线程的调度策略（如 SCHED_FIFO, SCHED_RR）。
+- pthread_attr_set/getdetachstate:线程的分离状态（分离或非分离）。
+*/
+```
+
+```c++
+int pthread_attr_init(pthread_attr_t *attr);
+
+/*
+attr:       指向 pthread_attr_t 结构的指针，此函数初始化该结构到默认值，准备用于 pthread_create 中。
+*/
+```
+
+### 线程终止
+
+```c++
+void pthread_exit(void *retval);
+
+/*
+retval:     指针，指向返回值，这个返回值可以被同一进程中的其他线程通过 pthread_join() 函数接收。如果线程不需要提供返回值，则可以传递 NULL。
+*/
+
+int pthread_join(pthread_t thread, void **retval);
+/*
+thread:     要等待的线程的标识符，该标识符由 pthread_create 函数返回。
+retval:     指向指针的指针，用于存储线程通过 return 语句或 pthread_exit() 返回的退出状态。如果不关心线程的返回值，则可以设置为 NULL。
+*/
+// 调用线程将一直被阻塞，直到指定的线程调用pthread_exit、从启动例程中返回或者被取消，前两种方式会将返回值传递给retval，第三种会将指向的内存位置设置为PTHREAD_CANCELED
+// 在pthread_join被调用之后，即使没有显示的调用pthred_detach，被join的线程资源也会自动释放，尝试对一个detach线程join调用会失败 
+
+int pthread_cancel(pthread_t thread);
+
+/*
+thread:    要取消的线程的标识符。这是一个 pthread_t 类型的值，通常由 pthread_create() 函数返回。
+
+描述: 请求取消同一进程中的另一个线程。被取消的线程并不会立即终止，取消请求会在线程到达某个取消点时生效，除非线程设置了异步取消能力。线程取消是协作性的，线程需要定期检查是否已被取消，并相应地清理资源。
+返回值:   成功时返回 0；失败时返回错误码，如 ESRCH 表示没有找到相应线程。
+*/
+
+void pthread_cleanup_push(void (*routine)(void *), void *arg);
+
+/*
+routine:    指向要执行的清理函数的指针。此函数由线程调用，当线程退出时，无论是通过 pthread_exit 调用，还是响应取消请求，都会执行。
+arg:        传递给清理函数的参数。这可以是指向任何类型的数据的指针，通常用于传递必须释放或清理的资源的信息。
+
+描述:       pthread_cleanup_push 用于注册一个在线程终止时自动执行的清理处理程序。这个处理程序将被放置在一个堆栈上，线程终止时将按照后进先出的顺序执行。
+注意        从启动例程中返回而终止的情况下，清理程序不会被调用，exit或者cancel的情况才会被调用
+*/
+
+void pthread_cleanup_pop(int execute);
+
+/*
+execute:    一个整数值，用于指示是否立即执行清理处理程序。
+            - 如果为 0，则仅从清理堆栈中移除处理程序，不执行。
+            - 如果非 0，则从堆栈中移除处理程序，并执行它。
+
+描述:       pthread_cleanup_pop 用于移除最近注册的清理处理程序。根据传递给 execute 参数的值，它可以选择性地执行清理处理程序。通常与 pthread_cleanup_push 配对使用。
+注意        在一些实现中，pthread_cleanup_push 和 pthread_cleanup_pop 需要在同一词法作用域内使用，因为它们可能被实现为宏，使用了 { 和 } 对于作用域的处理。这就要求它们必须在同一个函数中配对使用。
+*/
+
+int pthread_detach(pthread_t thread);
+
+/*
+thread:     要分离的线程的标识符，该标识符由 pthread_create 函数返回。
+
+描述:       pthread_detach 函数用于将指定的线程置于分离状态。分离状态的线程在终止时会自动释放所有资源，包括线程描述符和堆栈。这意味着一旦线程终止，它的资源和状态不能通过 pthread_join 来回收或检查。
+
+返回值:    成功时返回 0；如果失败，则返回一个错误码，例如：
+            - EINVAL：指定的线程标识符不是一个正在运行的线程。
+            - ESRCH：没有找到与给定线程标识符相对应的线程
+*/
+
+```
+
+### 线程同步
+
+#### 互斥量
+
+```c++
+// 静态分配
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// 动态分配
+pthread_mutex_t *mutex = malloc(sizeof(pthread_mutex_t));
+pthread_mutex_init(mutex, NULL); // 使用默认属性初始化互斥锁
+
+
+int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr);
+
+/*
+mutex:      指向互斥锁的指针。
+attr:       指向互斥锁属性的指针。如果设置为 NULL，互斥锁使用默认属性。
+注意事项:   互斥锁必须在使用前初始化。如果 attr 是 NULL，互斥锁将被初始化为默认属性。
+*/
+int pthread_mutex_destroy(pthread_mutex_t *mutex);
+
+/*
+mutex:      指向互斥锁的指针。
+注意事项:   销毁互斥锁后，不应再使用它，除非再次初始化。尝试销毁一个正在被锁定的互斥锁会导致不可预测的行为。
+*/
+
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+int pthread_mutex_trylock(pthread_mutex_t *mutex);
+
+/*
+mutex:      指向互斥锁的指针。pthread_mutex_lock 用于获取互斥锁，而 pthread_mutex_unlock 用于释放互斥锁。
+trylock注意事项:   尝试锁定互斥锁而不阻塞。如果互斥锁已经被其他线程锁定，函数将立即返回一个非零值（通常是EBUSY）。如果成功获取锁，返回0。
+*/
+
+// 关于pthread_mutexattr_t
+int pthread_mutexattr_init(pthread_mutexattr_t *attr);
+int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
+int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type);
+
+/*
+attr:       指向互斥锁属性对象的指针。
+type:       指定新的互斥锁类型。常用的类型包括：
+            PTHREAD_MUTEX_NORMAL,
+            PTHREAD_MUTEX_ERRORCHECK,
+            PTHREAD_MUTEX_RECURSIVE。
+
+注意事项:   设置互斥锁的类型可以改变互斥锁的行为。例如，PTHREAD_MUTEX_RECURSIVE 允许同一个线程多次锁定同一个互斥锁。
+*/
+```
+
+#### `pthread_mutex_timedlock`
+
+```c++
+int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *timeout);
+
+/*
+mutex:      指向互斥锁的指针。
+timeout:    指向 `timespec` 结构的指针，该结构定义了锁定操作应超时的绝对时间。
+
+注意事项:   函数尝试锁定互斥锁。如果互斥锁已经被另一个线程锁定，调用线程将阻塞直到互斥锁变为可用或直到超过指定的 timeout 时间。如果在指定时间内互斥锁未能被锁定，则返回 ETIMEDOUT 错误码。这个函数对于实现具有超时的同步控制是非常有用的。
+*/
+
+```
+
+#### 读写锁
+
+```c++
+int pthread_rwlock_init(pthread_rwlock_t *rwlock, const pthread_rwlockattr_t *attr);
+
+/*
+rwlock:     指向读写锁变量的指针。
+attr:       指向读写锁属性的指针，可用于定义锁的行为。如果传入 NULL，使用默认属性。
+
+注意事项:   读写锁在使用前必须初始化。attr 参数允许定义锁的行为，例如偏向读者或写者。
+*/
+
+int pthread_rwlock_destroy(pthread_rwlock_t *rwlock);
+
+/*
+rwlock:     指向读写锁变量的指针。
+
+注意事项:   销毁后的读写锁不应再被使用，除非重新初始化。尝试销毁一个正在被使用的读写锁可能导致未定义行为。
+*/
+
+int pthread_rwlock_rdlock(pthread_rwlock_t *rwlock);
+
+/*
+rwlock:     指向读写锁变量的指针。
+
+注意事项:   请求以读模式锁定读写锁。如果锁已被写者占用或等待，则调用线程将阻塞，直到可以获得读锁。
+*/
+
+int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock);
+
+/*
+rwlock:     指向读写锁变量的指针。
+
+注意事项:   请求以写模式锁定读写锁。如果锁已被其他读者或写者占用，则调用线程将阻塞，直到可以获得写锁。
+*/
+
+int pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
+
+/*
+rwlock:     指向读写锁变量的指针。
+
+注意事项:   解锁读写锁。只有锁定锁的线程才能解锁它。尝试解锁未被锁定的读写锁可能导致未定义行为。
+*/
+
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock);
+
+/*
+rwlock:     指向读写锁变量的指针。
+
+注意事项:   尝试以读模式锁定读写锁，但不阻塞。如果锁立即可用，则返回0，否则返回EBUSY。
+*/
+
+int pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock);
+
+/*
+rwlock:     指向读写锁变量的指针。
+
+注意事项:   尝试以写模式锁定读写锁，但不阻塞。如果锁立即可用，则返回0，否则返回EBUSY。
+*/
+
+/*-------------------------------------------关于rwlockattr_t-------------------------------------------*/
+
+int pthread_rwlockattr_init(pthread_rwlockattr_t *attr);
+
+/*
+attr:       指向读写锁属性对象的指针。
+
+注意事项:   用于初始化读写锁属性对象，该对象在配置读写锁行为时使用。
+*/
+
+int pthread_rwlockattr_destroy(pthread_rwlockattr_t *attr);
+
+/*
+attr:       指向读写锁属性对象的指针。
+
+注意事项:   用于销毁读写锁属性对象，释放任何相关资源。销毁后的属性对象不应再被使用。
+*/
+
+int pthread_rwlockattr_setkind_np(pthread_rwlockattr_t *attr, int pref);
+
+/*
+attr:       指向读写锁属性对象的指针。
+pref:       指定锁的类型，影响读写操作的优先级。常见的类型包括：
+            PTHREAD_RWLOCK_PREFER_READER_NP,
+            PTHREAD_RWLOCK_PREFER_WRITER_NP,
+            PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP.
+
+注意事项:   选择合适的类型可以防止读者或写者饥饿，特别是在高负载条件下。
+*/
+
+int pthread_rwlockattr_getkind_np(const pthread_rwlockattr_t *attr, int *pref);
+
+/*
+attr:       指向读写锁属性对象的指针。
+pref:       用来存储当前锁的类型配置。
+
+注意事项:   用于查询设置的锁类型，理解锁行为有助于调试和性能优化。
+*/
+
+int pthread_rwlockattr_setpshared(pthread_rwlockattr_t *attr, int pshared);
+
+/*
+attr:       指向读写锁属性对象的指针。
+pshared:    设置读写锁是否可以跨进程共享。取值可以是PTHREAD_PROCESS_SHARED或PTHREAD_PROCESS_PRIVATE。
+
+注意事项:   通常在希望在多个进程间共享读写锁时设置为PTHREAD_PROCESS_SHARED。
+*/
+
+int pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *attr, int *pshared);
+
+/*
+attr:       指向读写锁属性对象的指针。
+pshared:    用来存储当前属性对象的进程共享设置。
+
+注意事项:   用于查询读写锁的共享属性。
+*/
+```
+
+#### 带有超时的读写锁
+
+```c++
+int pthread_rwlock_timedrdlock(pthread_rwlock_t *rwlock, const struct timespec *timeout);
+
+/*
+rwlock:     指向读写锁变量的指针。
+timeout:    指定锁操作应该超时的绝对时间。
+
+注意事项:   尝试以读模式锁定读写锁，但带有超时。如果在指定的时间内未能获取锁，则返回ETIMEDOUT。
+*/
+
+int pthread_rwlock_timedwrlock(pthread_rwlock_t *rwlock, const struct timespec *timeout);
+
+/*
+rwlock:     指向读写锁变量的指针。
+timeout:    指定锁操作应该超时的绝对时间。
+
+注意事项:   尝试以写模式锁定读写锁，但带有超时。如果在指定的时间内未能获取锁，则返回ETIMEDOUT。
+*/
+
+```
+
+#### 条件变量
+
+```c++
+int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr);
+
+/*
+cond:       指向条件变量的指针。
+attr:       指向条件变量属性的指针，可用于设置条件变量的属性。如果为 NULL，使用默认属性。
+
+注意事项:   条件变量在使用前必须初始化。如果 attr 是 NULL，则条件变量被初始化为默认属性。
+*/
+int pthread_cond_destroy(pthread_cond_t *cond);
+
+/*
+cond:       指向条件变量的指针。
+
+注意事项:   销毁后的条件变量不应再被使用，除非重新初始化。尝试销毁正在等待的条件变量可能导致未定义行为。
+*/
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+
+/*
+cond:       指向条件变量的指针。
+mutex:      指向已锁定的互斥锁的指针。
+
+注意事项:   调用线程在条件变量上等待，同时释放互斥锁。当被唤醒时，互斥锁将再次被锁定。这需要与 pthread_cond_signal 或 pthread_cond_broadcast 结合使用。
+*/
+int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *timeout);
+
+/*
+cond:       指向条件变量的指针。
+mutex:      指向已锁定的互斥锁的指针。
+timeout:    指定等待应超时的绝对时间。
+
+注意事项:   类似于 pthread_cond_wait，但有超时限制。如果在指定时间内条件未被触发，则返回 ETIMEDOUT。
+*/
+int pthread_cond_signal(pthread_cond_t *cond);
+
+/*
+cond:       指向条件变量的指针。
+
+注意事项:   唤醒等待该条件变量的至少一个线程。如果没有线程在等待，该调用无效果。
+*/
+int pthread_cond_broadcast(pthread_cond_t *cond);
+
+/*
+cond:       指向条件变量的指针。
+
+注意事项:   唤醒等待该条件变量的所有线程。如果没有线程在等待，该调用无效果。
+*/
+
+```
+
+#### 自旋锁
+
+```c++
+int pthread_spin_init(pthread_spinlock_t *lock, int pshared);
+
+/*
+lock:       指向自旋锁变量的指针。
+pshared:    指示自旋锁是否应该在多个进程间共享。如果值为PTHREAD_PROCESS_PRIVATE（默认），锁只在同一进程的线程间共享。如果值为PTHREAD_PROCESS_SHARED，则可在多个进程间共享。
+
+注意事项:   自旋锁在使用前必须初始化。这个函数初始化自旋锁，设置它的共享模式。
+*/
+
+int pthread_spin_destroy(pthread_spinlock_t *lock);
+
+/*
+lock:       指向自旋锁变量的指针。
+
+注意事项:   销毁自旋锁后，不应再使用它，除非重新初始化。销毁一个正在被持有的锁可能导致未定义行为。
+*/
+
+int pthread_spin_lock(pthread_spinlock_t *lock);
+
+/*
+lock:       指向自旋锁变量的指针。
+
+注意事项:   调用线程尝试获取自旋锁。如果锁已被另一个线程持有，调用线程将在这里循环等待（自旋），直到锁变为可用。
+*/
+
+int pthread_spin_trylock(pthread_spinlock_t *lock);
+
+/*
+lock:       指向自旋锁变量的指针。
+
+注意事项:   尝试获取自旋锁，但不会造成调用线程长时间等待。如果锁已经被其他线程占用，函数将立即返回一个非零值（通常是EBUSY）。如果成功获取了锁，返回0。
+*/
+
+int pthread_spin_unlock(pthread_spinlock_t *lock);
+
+/*
+lock:       指向自旋锁变量的指针。
+
+注意事项:   释放自旋锁，使其变为可用状态，其他线程可以继续争取锁的控制权。只有锁定锁的线程才能解锁它。
+*/
+```
+
+#### 屏障
+
+```c++
+int pthread_barrier_init(pthread_barrier_t *barrier, const pthread_barrierattr_t *attr, unsigned int count);
+
+/*
+barrier:    指向屏障变量的指针。
+attr:       指向屏障属性对象的指针，如果为 NULL，则使用默认属性。
+count:      指定必须到达屏障的线程数量，即屏障的参与者数量。
+
+注意事项:   屏障在使用前必须初始化。count 参数指定了必须调用 pthread_barrier_wait 才能触发屏障的线程数量。
+*/
+
+int pthread_barrier_destroy(pthread_barrier_t *barrier);
+
+/*
+barrier:    指向屏障变量的指针。
+
+注意事项:   销毁屏障后，不应再使用它，除非重新初始化。尝试销毁一个正在使用中的屏障可能导致未定义行为。
+*/
+
+int pthread_barrier_wait(pthread_barrier_t *barrier);
+
+/*
+barrier:    指向屏障变量的指针。
+
+注意事项:   当调用此函数的线程数量达到初始化屏障时指定的 count 时，屏障开放，所有等待的线程将继续执行。
+            函数返回 PTHREAD_BARRIER_SERIAL_THREAD 给一个线程，其他线程收到 0。返回 PTHREAD_BARRIER_SERIAL_THREAD
+            的线程可以执行一些清理任务。
+*/
+
+```
+
 ## 线程控制
+
+```c++
+
+```
+
+### 线程权限
+
+### 线程属性
+
+### 同步属性
+
+### 重入
+
+### 线程特定数据
+
+### 取消选项
+
+### 线程和信号
+
+### 线程和 **Fork**
+
+### 线程和 I/O
 
 ## 守护进程
 
