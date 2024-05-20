@@ -14,9 +14,99 @@
 - 使用 `readelf` 工具产看二进制文件
 - ``text``  ``rodata`` ``data`` ``bss`` ``debug`` ``dynamic`` ``fini`` ``init`` ``symtab``
 
+- ELF 文件的类型
+
+    ```text
+    Relocatable File        .o .a
+    Executable File         
+    Shared Object File      .so 
+    Core Dump File  
+
+    ELF 文件基本结构
+    +====================+
+    +     ELF header     + // 包含了整个文件的基本属性，如：文件版本，目标机器型号，入口地址。
+    +====================+
+    +Program header table+ // 程序标头表是一组程序标头，它们定义了运行时程序的内存布局。对于.obj文件可选的
+    +====================+
+    +      .interp       + // 可执行文件所需要的动态链接器的位置。
+    +--------------------+
+    +   .note.ABI-tag    + // 用于声明ELF的预期运行时ABI。包括操作系统名称及其运行时版本。
+    +--------------------+
+    + .note.gnu.build-id + // 表示唯一的构建ID位串。
+    +--------------------+
+    +     .gnu.hash      + // 符号hash表。若段名是.hash，则使用的是SYSV hash，其比gnu hash性能差。
+    +--------------------+
+    +      .dynsym       + // 动态符号表用来保存与动态链接相关的导入导出符号，不包括模块内部的符号。
+    +--------------------+
+    +      .dynstr       + // 动态符号字符串表，用于保存符号名的字符串表。静态链接时为.strtab。
+    +--------------------+
+    +    .gnu.version    + // 表中条目与.dynsym动态符号表相同。每个条目指定了相应动态符号定义或版本要求。
+    +--------------------+
+    +   .gnu.version_r   + // 版本定义。
+    +--------------------+
+    +     .rela.dyn      + // 包含共享库（PLT除外）所有部分的RELA类型重定位信息。
+    +--------------------+
+    +     .rela.plt      + // 包含共享库或动态链接的应用程序的PLT节的RELA类型重定位信息。
+    +--------------------+
+    +       .init        + // 程序初始化段。
+    +--------------------+
+    +        .plt        + // 过程链接表(Procedure Linkage Table)，用来实现延迟绑定。
+    +--------------------+
+    +      .plt.got      + // 暂无。。。。。
+    +--------------------+
+    +       .text        + // 代码段
+    +--------------------+
+    +       .fini        + // 程序结束段
+    +--------------------+
+    +      .rodata       + // 只读变量（const修饰的）和字符串变量。
+    +--------------------+
+    +      .rodata1      + // 据我所知，.rodata和.rodata1是相同的。一些编译器会.rodata分为2个部分。
+    +--------------------+
+    +   .eh_frame_hdr    + // 包含指针和二分查找表，(一般在C++)运行时可以有效地从eh_frame中检索信息。
+    +--------------------+
+    +     .eh_frame      + // 它包含异常解除和源语言信息。此部分中每个条目都由单个CFI（呼叫帧信息）表示。
+    +--------------------+
+    +    .init_array     + // 包含指针指向了一些初始化代码。初始化代码一般是在main函数之前执行的。
+    +--------------------+
+    +    .fini_array     + // 包含指针指向了一些结束代码。结束代码一般是在main函数之后执行的。
+    +--------------------+
+    +      .dynamic      + // 保存动态链接器所需的基本信息。
+    +--------------------+
+    +        .got        + // 全局偏移表，存放所有对于外部变量引用的地址。
+    +--------------------+
+    +      .got.plt      + // 保存所有对于外部函数引用的地址。延迟绑定主要使用.got.plt表。
+    +--------------------+
+    +       .data        + // 全局变量和静态局部变量。
+    +--------------------+
+    +       .data1       + // 据我所知，.data和.data1是相同的。一些编译器会.data分为2个部分。
+    +--------------------+
+    +        .bss        + // 未初始化的全局变量和局部局部变量。
+    +--------------------+
+    +      .comment      + // 存放编译器版本信息
+    +--------------------+
+    +   .debug_aranges   + // 内存地址和编译之间的映射
+    +--------------------+
+    +    .debug_info     + // 包含DWARF调试信息项（DIE）的核心DWARF数据
+    +--------------------+
+    +   .debug_abbrev    + // .debug_info部分中使用的缩写
+    +--------------------+
+    +    .debug_line     + // 程序行号
+    +--------------------+
+    +     .debug_str     + // .debug_info使用的字符串表
+    +--------------------+
+    +      .symtab       + // 静态链接时的符号表，保存了所有关于该目标文件的符号的定义和引用。
+    +--------------------+
+    +      .strtab       + // 默认字符串表。
+    +--------------------+
+    +     .shstrtab      + // 字符串表。
+    +====================+
+    +Section header table+ // 用于引用Sections的位置和大小，并且主要用于链接和调试目的。对于Exec文件可选
+    +====================+
+    ```
+
 ### 程序是如何“跑”的
 
-- 使用 ``strace`` 追踪
+- 使用 ``strace`` 追踪系统调用
 
 ### ``gcc``一些编译选项
 
@@ -37,53 +127,28 @@
     - `-c`：进行编译和汇编，生成 ``.o`` 文件 可以直接传递 ``.i`` 或者 ``.s`` 文件
     - `-shared`：生成动态库
     - `-fpic`：生成位置无关代码
+    - `-fpie`：生成位置无关的可执行文件
     - `-static`：使用静态链接
+
+### 变参函数
+
+```c++
+// 不同 arch有不同的实现，根据函数调用传参规则实现
+void va_start(va_list ap, prev_param);
+type va_list(va_list ap, type);
+void va_end(va_lsit ap);
+```
 
 ## 1. 文件 I/O
 
 ### Linux 中的文件
 
-内核中进程对应的结构是 ``task_strcut`` 进程的文件表保存在 ``task_struct->files`` 中
+使用文件描述符即句柄，有两个好处。一是增加安全性，二是增加了可拓展性
 
-```c
-struct embedded_fd_set {
-    unsigned long fds_bits[1];
-    // "结构的尾部扩展" 使用大小为1的数组模拟柔性数组
-};
-
-struct fdtable {
-    unsigned int max_fds;
-    struct file ** fd;      /* current fd array */
-    fd_set *close_on_exec;
-    fd_set *open_fds;
-    struct rcu_head rcu;
-    struct fdtable *next;
-};
-
-/*
-* Open file table structure
-*/
-struct files_struct {
-/*
-* read mostly part
-*/
-    atomic_t count; // 文件表的引用计数
-    struct fdtable *fdt;
-    struct fdtable fdtab; // 一种内核的优化策略，默认大小的文件表足以应付大多数情况，可以避免频繁的内存申请
-/*
-* written part on a separate cache line in SMP
-*/
-    spinlock_t file_lock ____cacheline_aligned_in_smp;
-    int next_fd;    // Linux 文件描述符策略永远选择最小的可用的文件描述赋
-    struct embedded_fd_set close_on_exec_init;
-    struct embedded_fd_set open_fds_init;
-    struct file * fd_array[NR_OPEN_DEFAULT]; // 最大值默认64
-};
-```
-
-![结构关系图](./imags/结构关系图.png)
+[相关数据结构介绍](./APUE.md#文件管理)
 
 ```c++
+// init 是Linux的第一个进程，他的文件表是一个全局变量
 struct files_struct init_files = {
     .count		= ATOMIC_INIT(1),
     .fdt		= &init_files.fdtab,
@@ -107,36 +172,66 @@ struct files_struct init_files = {
     int open(const char *pathname, int flags, mode_t mode);
 
     /*
+        C语言不支持函数重载，为什么open可以有两个函数原型？
+            当我们调用open函数时，实际上调用的是glibc封装的函数，然后由glibc通过自陷指令，进入真正的系统调用
+            *所有的系统调用都要先经过glibc才会进入操作系统*
+            glibc提供了一个变参函数来满足open的两个函数原型
+        
+        描述符分配策略：永远分配最小的可用描述符
+    */
+
+    /*
     flags: 
-        O_RDONLY
-        O_WRONLY
-        O_RDWR
-        O_APPEND
-        O_ASYNC
-        O_CLOEXEC
-        O_CREAT
-        O_DIRECT
-        O_DIRECTORY
-        O_EXCL             
-        O_LARGEFILE          : 表明文件为大文件
-        O_NOATIME            : 读取文件时，不更新最后的访问时间
-        O_NONBLOCK O_NDELAY
-        O_SYNC
-        O_TRUNC              : 打开文件时，把文件长度截断为0，写文件时，如果作为新文件重新写入，一定要使用O_TRUNC
+        O_RDONLY               : 打开文件仅供读取。
+        O_WRONLY               : 打开文件仅供写入。
+        O_RDWR                 : 打开文件同时用于读写。
+        O_APPEND               : 每次写操作都将数据追加到文件的末尾。
+        O_ASYNC                : 启用信号驱动的异步I/O，当I/O操作可以进行时，将向进程发送信号。
+        O_CLOEXEC              : 设置执行时关闭（close-on-exec）标志，当执行新程序时文件将被自动关闭。
+        O_CREAT                : 如果指定文件不存在，则创建它。使用这个选项通常需要提供一个额外的模式参数，指定新文件的权限。
+        O_DIRECT               : 最小化或跳过缓存和缓冲，直接从硬件读写数据。
+        O_DIRECTORY            : 如果文件路径不是目录，则失败。这个标志用于打开目录。
+        O_EXCL                 : 与 O_CREAT 一起使用时，如果文件已存在，则失败。这对于在创建文件时检查是否存在相同文件很有用。
+        O_LARGEFILE            : 表明文件为大文件
+        O_NOATIME              : 读取文件时，不更新最后的访问时间
+        O_NONBLOCK O_NDELAY    : 打开文件或设备时，非阻塞模式（读写操作立即返回，而不是等待）。O_NONBLOCK 和 O_NDELAY 在许多系统上有相同的效果，尽管历史上可能有所不同。
+        O_SYNC                 : 打开文件用于同步I/O。每次 write() 都等待物理 I/O 操作完成。
+        O_TRUNC                : 打开文件时，把文件长度截断为0，写文件时，如果作为新文件重新写入，一定要使用O_TRUNC
     */
     ```
 
 - `open` 源码追踪
 
     ```c++
-    // 内部的实现主要依靠 get_unused_fd_flags 和 fd_install
+    # define open(name, flags)	__open_nocancel (name, flags)
+    /*
+        User(glibc):
+            open -> __open_nocancel(name, flags) -> INLINE_SYSCALL_CALL(openat, AT_FDCWD, file, oflag, mode)
+        Kernel(Linux):
+            openat -> do_sys_open
+    */
+
+   int
+    __open_nocancel (const char *file, int oflag, ...)
+    {
+        int mode = 0;
+        if (__OPEN_NEEDS_MODE (oflag))          // 只有在O_TMPFILE 和 O_CREAT模式下打开的文件 mode 参数才有效
+        {
+            va_list arg;
+            va_start (arg, oflag);
+            mode = va_arg (arg, int);
+            va_end (arg); 
+        }
+        return INLINE_SYSCALL_CALL (openat, AT_FDCWD, file, oflag, mode);
+    }
+
     long do_sys_open(int dfd, const char __user *filename, int flags, int mode)
     {
-        char *tmp = getname(filename);
+        char *tmp = getname(filename);          // 用于分配一个内核缓冲区并调用do_getname将用户空间的文件名拷贝到内核空间
         int fd = PTR_ERR(tmp);
 
         if (!IS_ERR(tmp)) {
-            fd = get_unused_fd_flags(flags);
+            fd = get_unused_fd_flags(flags);    // 得到最小的没有使用的fd，内部调用alloc_fd(0, flags)
             if (fd >= 0) {
                 struct file *f = do_filp_open(dfd, tmp, flags, mode, 0);
                 if (IS_ERR(f)) {
@@ -147,7 +242,7 @@ struct files_struct init_files = {
                     fd_install(fd, f);
                 }
             }
-            putname(tmp);
+            putname(tmp);                       // 归还分配的内核空间
         }
         return fd;
     }
@@ -171,36 +266,13 @@ SYSCALL_DEFINE2(creat, const char __user *, pathname, int, mode)
     ```c++
     SYSCALL_DEFINE1(close, unsigned int, fd)
     {
-        struct file * filp;
-        struct files_struct *files = current->files;
-        struct fdtable *fdt;
-        int retval;
-
-        spin_lock(&files->file_lock);
-        fdt = files_fdtable(files);
-        if (fd >= fdt->max_fds)
-            goto out_unlock;
-        filp = fdt->fd[fd];
-        if (!filp)
-            goto out_unlock;
-        rcu_assign_pointer(fdt->fd[fd], NULL);
+        ...
+        rcu_assign_pointer(fdt->fd[fd], NULL); 
         FD_CLR(fd, fdt->close_on_exec);
         __put_unused_fd(files, fd);
         spin_unlock(&files->file_lock);
-        retval = filp_close(filp, files);
-
-        /* can't restart close syscall because file table entry was cleared */
-        if (unlikely(retval == -ERESTARTSYS ||
-                retval == -ERESTARTNOINTR ||
-                retval == -ERESTARTNOHAND ||
-                retval == -ERESTART_RESTARTBLOCK))
-            retval = -EINTR;
-
-        return retval;
-
-    out_unlock:
-        spin_unlock(&files->file_lock);
-        return -EBADF;
+        retval = filp_close(filp, files);  
+        ...
     }
 
     static void __put_unused_fd(struct files_struct *files, unsigned int fd)
@@ -212,32 +284,50 @@ SYSCALL_DEFINE2(creat, const char __user *, pathname, int, mode)
     }
     ```
 
-- 自定义 ``files_operations``
+- 遗忘 `close` 可能会造成文件描述符始终没有被释放，用于文件管理的某些内存结构没有被释放，如果进程是常驻进程，会导致严重的问题，``fdtable`` 会被无限拓展，会不断申请 ``struct file`` 结构体
 
-    ```c++
-    static const struct file_operations socket_file_ops = {
-        .owner =	THIS_MODULE,
-        .llseek =	no_llseek,
-        .aio_read =	sock_aio_read,
-        .aio_write =	sock_aio_write,
-        .poll =		sock_poll,
-        .unlocked_ioctl = sock_ioctl,
-    #ifdef CONFIG_COMPAT
-        .compat_ioctl = compat_sock_ioctl,
-    #endif
-        .mmap =		sock_mmap,
-        .open =		sock_no_open,	/* special open code to disallow open via /proc */
-        .release =	sock_close,
-        .fasync =	sock_fasync,
-        .sendpage =	sock_sendpage,
-        .splice_write = generic_splice_sendpage,
-        .splice_read =	sock_splice_read,
-    };
-    ```
-
-- 遗忘 `close` 可能会造成文件描述符始终没有被释放，用于文件管理的某些内存结构没有被释放
     - ``expand_files`` 用于扩展当前的文件表
+
+        ```c++
+        // expand_files -> expand_fdtable
+        static int expand_fdtable(struct files_struct *files, int nr)        
+        {
+            ...
+            spin_unlock(&files->file_lock);
+            new_fdt = alloc_fdtable(nr);
+            spin_lock(&files->file_lock);           // 防止在持有自旋的时间由于分配内存被阻塞，因此先释放锁，在获取锁
+            ...
+            if (unlikely(new_fdt->max_fds <= nr))   // 在扩展期间，nr发生了了变化
+            ...
+            cur_fdt = files_fdtable(files);
+            if (nr >= cur_fdt->max_fds) {
+                copy_fdtable(new_fdt, cur_fdt);
+                rcu_assign_pointer(files->fdt, new_fdt);
+                if (cur_fdt->max_fds > NR_OPEN_DEFAULT)
+                    free_fdtable(cur_fdt);
+            } else {                                // 也许在我们释放锁的期间，其他的线程完成了扩展
+                free_fdarr(new_fdt);
+                free_fdset(new_fdt);
+                kfree(new_fdt);
+            }
+            return 1;
+        }
+        ```
+
     - ``get_empty_filp`` 用于申请空闲的 ``file`` 结构
+
+        ```c++
+        struct file *get_empty_filp(void)
+        {
+            if (get_nr_files() >= files_stat.max_files && !capable(CAP_SYS_ADMIN)) {
+                // 先粗略判断，直接返回count
+                if (percpu_counter_sum_positive(&nr_files) >= files_stat.max_files)
+                // 如果不行，精确判断，计算sum
+                    goto over;
+            }
+            ...
+        }
+        ```
 
 - 针对常驻进程忘记关闭文件的危害，可以通过 ``lsof`` 查找问题
 
@@ -247,6 +337,7 @@ SYSCALL_DEFINE2(creat, const char __user *, pathname, int, mode)
 
     ```c++
     off_t lseek(int fd, off_t offset, int whence); // SEEK_SET、SEEK_CUR、SEEK_END
+    // 返回值是相对于文件起始位置的偏移量
     ```
 
 ### 读取文件

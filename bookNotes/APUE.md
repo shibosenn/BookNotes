@@ -75,6 +75,58 @@ POSIX 作为一个标准，试图融合不同 UNIX 系统（包括 System V 和 
     // 按顺序使用 %0， %1 ... 引用操作数
     ```
 
+- ``cpu_relax``
+
+    - 降低能耗
+
+    - 在超线程环境中，减少核心争用，更多的将资源让渡给其他线程
+
+- 可重入函数
+
+    - 尽量使用局部变量
+    - 使用全局变量要加以保护
+
+- **ACCESS_ONCE**
+
+    ```c++
+    #define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
+
+    // 可以防止一些编译器错误优化的发生
+
+    while(should_continue)  // ---> while(ACCESS_ONCE(should_continue))
+        do_something();
+
+    // 如果do_something完全没有任何修改，完全可以优化成
+    if(should_continue)
+        for(;;)
+            do_something();
+    
+    p = global_ptr         // ---> p = ACCESS_ONCE(global_ptr)
+    if(p && p->s && p->s>func) 
+        ...
+
+    // 也许会优化成
+    if(global_ptr && globale_ptr->s && global_ptr->s->func)
+        ...
+    ```
+
+- ``preempt_disable``
+
+    ```c++
+    # define add_preempt_count(val)	do { preempt_count() += (val); } while (0)
+
+    #define inc_preempt_count() add_preempt_count(1)
+    #define dec_preempt_count() sub_preempt_count(1)
+
+    #define preempt_count()	(current_thread_info()->preempt_count)
+
+    #define preempt_disable() \
+    do { \
+        inc_preempt_count(); \
+        barrier(); \
+    } while (0)
+    ```
+
 ## 00. Linux 中常见的数据结构
 
 ### 基础数据结构
@@ -109,7 +161,7 @@ POSIX 作为一个标准，试图融合不同 UNIX 系统（包括 System V 和 
 
     ```c++
     typedef struct {
-        volatile int counter;
+        volatile int counter;   // 告诉编译器，counter可能被程序外部修改，比如其他线程、中断服务例程
     } atomic_t;
     // volatile 关键字保证编译器不在进行优化，系统总是重新从他所在的内存读取数据
     ```
@@ -153,9 +205,49 @@ POSIX 作为一个标准，试图融合不同 UNIX 系统（包括 System V 和 
 
 - ``per-cpu``
 
-    静态的 ``per-cpu`` 变量会在链接时被放置在ELF文件的特定段 ``.data..percpu`` 中，所有变量的布局是连续的，从 ``__per_cpu_start`` 开始到 ``__per_cpu_end`` 结束，每个 **cpu** 都会有一个独立的内存副本。变量的访问通过计算偏移量实现，内核使用一个数组 ``__per_cpu_offset`` 存储每个 **cpu** 的偏移量。
+    静态的 ``per-cpu`` 变量会在链接时被放置在ELF文件的特定段 ``.data..percpu`` 中，所有变量的布局是连续的，从 ``__per_cpu_start`` 开始到 ``__per_cpu_end`` 结束，会在运行时为每个 **cpu**  创建一个独立的内存副本。变量的访问通过计算偏移量实现，内核使用一个数组 ``__per_cpu_offset`` 存储每个 **cpu** 的偏移量。
 
     动态的 ``per_cpu`` 变量通过内核的动态内存分配机制实现，内核维护了一个专用的 ``per_cpu`` 内存池实现
+
+    - 常用接口
+
+        ```c++
+        // 静态分配
+        DECLARE_PER_CPU(type, name)
+        get_cpu_var(var)
+        put_cpu_val(var)
+        // 动态分配
+        alloc_percpu(type)  // 返回地址
+        void free_percpu(void __percpu *ptr)
+        get_cpu_ptr()
+        put_cpu_ptr()
+        per_cpu_ptr(ptr, cpu)
+        ```
+
+    - ``struct percpu_counter``
+
+        ```c++
+        // 一种内核编程技巧，减少对全局变量的访问
+        struct percpu_counter {
+            spinlock_t lock;
+            s64 count;
+        #ifdef CONFIG_HOTPLUG_CPU
+            struct list_head list;	/* All percpu_counters are on a list */
+        #endif
+            s32 __percpu *counters;
+        };
+
+        /*
+            内核为了尽可能少的加锁，使用了一些编程技巧，对计数器增加或者减少计数时，大多数情况下不用加锁，
+            只修改每cpu变量s32 __percpu *counters，当计数超过一个范围时[-batch, batch],则进行加锁，
+            将每cpu变量s32 __percpu *counters;中的计数累计到s64 count中。
+        */
+
+        // 常用的api
+        percpu_counter_sum      //  返回精确值
+        percpu_counter_read     //  返回粗略值
+        percpu_counter_add      //  修改
+        ```
 
 - ``memory_barrier``
 
@@ -556,15 +648,21 @@ POSIX 作为一个标准，试图融合不同 UNIX 系统（包括 System V 和 
     - 读端对新旧数据不敏感
 
     ```c++
-    /**
-     * struct rcu_head - callback structure for use with RCU
-    * @next: next update requests in a list
-    * @func: actual update function to call after the grace period.
-    */
     struct rcu_head { // read copy update  -> 随意读，但更新数据的时候，需要先复制一份副本，在副本上修改，在一次性的替换旧数据
         struct rcu_head *next;
         void (*func)(struct rcu_head *head);
     };
+
+    /*
+        核心机制在于宽期限和订阅-发布机制
+    */
+
+    // 核心API    
+    rcu_read_lock
+    rcu_read_unlock
+    synchronize_rcu     // 核心所在，等带读者退出
+    rcu_assign_pointer  // 写者调用该函数为被RCU保护的指针分配一个新的值
+    rcu_dereference     // 读者调用它来获得一个被RCU保护的指针
     ```
 
 - ``mutex``
@@ -591,7 +689,11 @@ POSIX 作为一个标准，试图融合不同 UNIX 系统（包括 System V 和 
     */
     ```
 
+- ``semaphore``
+
 - ``rw_semaphore``
+
+- ``Lockdep``
 
 ### 文件管理
 
@@ -2288,11 +2390,6 @@ stream:    由popen返回的文件指针。
 注意事项:  pclose关闭popen打开的流，并等待命令执行完毕，返回命令的退出状态。
 ```
 
-### 协同进程
-
-```c++
-```
-
 ### FIFO
 
 ```c++
@@ -2314,7 +2411,11 @@ mode:      设置文件的权限。
 
 注意事项:  功能类似mkfifo，但可以相对于一个打开的目录文件描述符创建FIFO。
 */
+```
 
+### XSI IPC
+
+```c++
 key_t ftok(const char *pathname, int proj_id);
 
 /*
@@ -2324,8 +2425,6 @@ proj_id:   一个非零字符，确保在同一路径下生成不同的键。
 注意事项:  生成一个System V IPC键，通常用于shmget或semget。
 */
 ```
-
-### XSI IPC
 
 ### 消息队列
 
@@ -2338,6 +2437,8 @@ msgflg:    消息队列的创建标志和权限。
 
 注意事项:  用于创建或访问一个消息队列。
 */
+
+int msgctl(int msqid, int cmd, struct msqid_ds *buf);
 
 int msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg);
 
@@ -2512,33 +2613,3 @@ sval:   用于存储信号量当前值的整数指针。
 ## 高级IPC
 
 ## 终端IO
-
-```c++
-```
-
-```c++
-```
-
-```c++
-```
-
-```c++
-```
-
-```c++
-```
-
-```c++
-```
-
-```c++
-```
-
-```c++
-```
-
-```c++
-```
-
-```c++
-```
