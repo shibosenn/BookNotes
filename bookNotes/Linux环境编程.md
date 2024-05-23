@@ -135,7 +135,7 @@
 ```c++
 // 不同 arch有不同的实现，根据函数调用传参规则实现
 void va_start(va_list ap, prev_param);
-type va_list(va_list ap, type);
+type va_arg(va_list ap, type);
 void va_end(va_lsit ap);
 ```
 
