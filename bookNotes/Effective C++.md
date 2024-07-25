@@ -198,6 +198,15 @@
 	};
 	```
 
+- 关于 ``const`` 的一些补充
+
+	- c++ 实现常量语义会依赖编译时的符号替换，一般不会从内存中取值，已知的特殊情况：
+
+	```c++
+	1. volatile 修饰
+	2. 不是内置类型，是自定义的类型
+	```
+
 - 关于去常量性的操作
 
 	不同的编译器可能执行不一样的标准，对于本来就是 **base** 是常量的指针执行 ``const_cast`` 操作，在 **clang** 编译器下会出问题，但是 **g++** 编译器下没有问题
@@ -374,7 +383,7 @@
 	class Widget{
 		Widget& operator= (Widget rhs) {
 			swap(rhs);
-			return *this`
+			return *this
 		}
 	};
 	```
@@ -396,7 +405,7 @@
 
 ### 条款16：成对使用 ``new`` 和 ``delete`` 时要采取相同的形式
 
-### 条款17：以独立语句将 `newd` 对象置入智能指针
+### 条款17：以独立语句将 `new` 对象置入智能指针
 
 ```c++
 processWidget(std::shared_ptr<Widget> (new Widget), priority());
@@ -631,6 +640,7 @@ processWidget(std::shared_ptr<Widget> (new Widget), priority());
 	- `static_cast` 从左值到将亡值
 
 		```c++
+		// 实际上根据测试并不会？
 		std::vector<int> v1{1, 2, 3};
 		std::vector<int> v2 = static_cast<std::vector<int>&&>(v1);
 		```
@@ -653,6 +663,7 @@ processWidget(std::shared_ptr<Widget> (new Widget), priority());
 	- `typeinfo` 对象不能直接构造或赋值，只能通过`typeid`操作符进行访问，主要方法有 `name` 和 ``operator=``
 	- 每个多态类型都会有一个关联的虚表，其中包含指向该类型 `type_info` 对象的指针
 	- `dynamic_cast` 一个没有虚函数的类的时候就会报错，`static_cast` 不受影响
+	- 用于类之间的上下行转换，相比于 ``static_cast`` 多了类型安全转换，运行效率低
 
 - ``const_cast``
 
@@ -763,7 +774,7 @@ public:
 
 Derived d;
 Base* pb = &d;
-d->func(); // x = 10
+pb->func();   // Derived::func with x = 10
 ```
 
 ### 条款38：通过复合塑模出 `has-a` 或 “根据某物实现出”
@@ -806,6 +817,21 @@ d->func(); // x = 10
 				std::cout << "C::f2" << std::endl;
 			}
 		}c;
+
+		/*
+		*** Dumping AST Record Layout
+				0 | struct C
+				0 |   struct A (primary base)
+				0 |     (A vtable pointer)
+				8 |     int ax
+			   12 |     int ay
+			   16 |   struct B (base)
+			   16 |     (B vtable pointer)
+			   24 |     int bx
+			   28 |   int cx
+				  | [sizeof=32, dsize=32, align=8,
+				  |  nvsize=32, nvalign=8]
+		*/
 
 		uintptr_t* vptr_A = reinterpret_cast<uintptr_t*>(&c);
 		uintptr_t* vptr_B = reinterpret_cast<uintptr_t*>(reinterpret_cast<char*>(&c) + sizeof(A));

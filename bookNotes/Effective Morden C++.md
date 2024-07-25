@@ -58,7 +58,7 @@ flag = false; // vBool[0] = false;
 - 大括号初始化的优先级
 
     - 在构造函数被调用时，如果形参中没有任何一个具备 `std::initializer_list` 类别，那么小括号和大括号的意义就没有区别
-    - 编译器调用具备`std::initializer_list` 形参的构造函数的意愿非常强烈 **！**
+    - 编译器调用具备`std::initializer_list` 型参的构造函数的意愿非常强烈 **！**
 
         ````c++
         class Widget {
@@ -66,7 +66,7 @@ flag = false; // vBool[0] = false;
 
             Widget(int x, bool y) { } // 1
 
-            Widget(std::initializer_list<std::string> iniL) { } // 2
+            Widget(std::initializer_list<std::int> iniL) { } // 2
 
             operator float() { }
         };

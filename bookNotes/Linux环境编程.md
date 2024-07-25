@@ -833,7 +833,7 @@ fork/vfork/clone -> do_fork -> copy_porcess -> copy_semundo/files/fs/sighand/sig
 
 ## 7. 理解 Linux 线程
 
-## 8. 理解 Linux 县城
+## 8. 理解 Linux 线程
 
 ## 9. 进程间通信：管道
 

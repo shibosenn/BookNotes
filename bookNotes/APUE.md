@@ -9,6 +9,15 @@ POSIX 作为一个标准，试图融合不同 UNIX 系统（包括 System V 和 
 
     System V 和 BSD 是具体的操作系统实现，它们具有各自独特的功能和工具；POSIX 是跨平台的标准集，定义了应该如何实现这些功能以确保跨平台兼容性。
 
+- ``ARRAY_SIZE``
+
+    ```c++
+    #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]) + __must_be_array(arr))
+    #define __must_be_array(a) \
+        BUILD_BUG_ON_ZERO(__builtin_types_compatible_p(typeof(a), typeof(&a[0])))
+    #define BUILD_BUG_ON_ZERO(e) (sizeof(struct { int:-!!(e); }))
+    ```
+
 - ``IS_ERR`` ``PRR_ERR`` ``ERR_PTR``
 
     内核空间的最后一个页专门为错误码保留，即内核用最后一页捕捉错误，因此一般人不会用到指向内核空间最后一页的指针
